@@ -1,0 +1,275 @@
+# hprof-analyzer — User guide
+
+[Português](../pt-BR/guia.md) · [Back to README](../../README.md)
+
+- [1. Overview](#1-overview)
+- [2. Build and install](#2-build-and-install)
+- [3. Capturing a heap dump](#3-capturing-a-heap-dump)
+- [4. Running the analyzer](#4-running-the-analyzer)
+- [5. Reading the report](#5-reading-the-report)
+- [6. Key concepts](#6-key-concepts)
+- [7. Performance and memory](#7-performance-and-memory)
+- [8. Languages (i18n)](#8-languages-i18n)
+- [9. Architecture](#9-architecture)
+- [10. Limitations](#10-limitations)
+- [11. Troubleshooting](#11-troubleshooting)
+
+## 1. Overview
+
+`hprof-analyzer` reads a JVM heap dump (`.hprof`) and writes two reports:
+
+- **HTML**: a single self-contained file. The charting library (Apache ECharts) and all the data are embedded, so it
+  opens offline and can be attached to a ticket or sent by e-mail. It follows the system light/dark theme.
+- **Markdown**: the same content as tables, with GC root paths drawn as Mermaid diagrams (rendered by GitHub, GitLab
+  and most Markdown viewers).
+
+Heap parsing is done by [Shark](https://square.github.io/leakcanary/shark/), the heap analysis library behind
+LeakCanary. The tool targets HotSpot/OpenJDK dumps.
+
+## 2. Build and install
+
+Requirements: JDK 21 or newer. Gradle is not needed; the wrapper downloads it.
+
+```bash
+./gradlew shadowJar   # build/libs/hprof-analyzer-all.jar (single runnable jar with all dependencies)
+./gradlew test        # unit and end-to-end tests
+```
+
+The end-to-end test dumps the heap of its own JVM, analyzes it and checks the reports. It also writes sample reports
+to `build/test-report.md`, `build/test-report.html` and `build/test-report-en.html`.
+
+Copy `hprof-analyzer-all.jar` anywhere; it has no other runtime dependency.
+
+## 3. Capturing a heap dump
+
+| Method | Command |
+| --- | --- |
+| Running process | `jcmd <pid> GC.heap_dump /path/app.hprof` |
+| Running process (jmap) | `jmap -dump:live,format=b,file=/path/app.hprof <pid>` |
+| On `OutOfMemoryError` | start the JVM with `-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/path/` |
+| From code | `ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean::class.java).dumpHeap(path, true)` |
+
+`jcmd GC.heap_dump` and `jmap -dump:live` run a full GC first, so the dump contains only live objects. Use
+`jcmd <pid> GC.heap_dump -all` to keep unreachable objects too.
+
+Heap dumps contain everything the application had in memory (passwords, tokens, personal data). Handle them and the
+generated reports as sensitive files.
+
+## 4. Running the analyzer
+
+```bash
+java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [options]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--out <dir>` | `.` | Output directory. Created if missing. Files are named after the dump (`app.hprof` → `app.html`, `app.md`). |
+| `--format html,md` | `html,md` | Comma-separated list of formats. |
+| `--top <n>` | `50` | Rows in each table (classes, objects, strings, arrays). |
+| `--no-retained` | off | Skip the dominator tree. About 2× faster and uses less memory, but retained sizes, the treemap and the "biggest objects" section are empty, and GC root paths are only computed for `--leak-class`. |
+| `--leak-class a.B,c.D` | — | Fully qualified class names. Up to 20 instances of these classes get a GC root path, in addition to the 10 biggest objects. |
+| `--i18n <code>` | `pt-BR` | Language of the reports and console messages. See [section 8](#8-languages-i18n). |
+| `-h`, `--help` | — | Print usage (in the language given by `--i18n`). |
+
+Progress is printed to stderr; the paths of the generated files are printed to stdout. Invalid arguments exit with
+code 2.
+
+Examples:
+
+```bash
+# English report, HTML only
+java -Xmx4g -jar hprof-analyzer-all.jar app.hprof --out report --format html --i18n en
+
+# Quick look at a very large dump
+java -Xmx8g -jar hprof-analyzer-all.jar huge.hprof --no-retained --top 30
+
+# Check why instances of a suspect class stay in memory
+java -Xmx4g -jar hprof-analyzer-all.jar app.hprof --leak-class com.acme.SessionContext,com.acme.CacheEntry
+```
+
+## 5. Reading the report
+
+The HTML report has a side menu with one entry per section. Tables can be sorted by clicking a column header. Charts
+show exact values on hover.
+
+### Summary
+hprof version, identifier size (4 or 8 bytes), dump timestamp (UTC), counts of objects, classes, instances, object
+arrays and primitive arrays, number of GC roots, total shallow size, and how many objects and bytes are reachable
+through strong references.
+
+### Class histogram
+One row per class (arrays included): number of instances, total shallow size and retained size. The chart shows the
+top 20 classes by retained size, shallow size or instance count (selector above the chart).
+
+The retained size of a class adds up the retained size of its instances that are not dominated by another instance of
+the same class. This prevents a linked list from being counted once per node.
+
+### Memory by package
+Shallow and retained size summed by Java package. Primitive arrays (`byte[]`, `int[]`...) have their own group, and
+classes without a package go to `(default)`.
+
+### Dominator tree
+The treemap shows the top of the dominator tree: each rectangle is an object, its area is its retained size, and the
+rectangles nested inside it are the objects it dominates. Click to zoom in, use the breadcrumb below to go back. Only
+the biggest children are drawn (100 at the first level, 15 at the second, 8 at the third).
+
+### Biggest objects (retained)
+Objects with the largest retained size, with their id, class, shallow size and, for strings and threads, their value
+or name.
+
+### Paths to GC roots
+For each suspect (the 10 biggest non-class objects, plus the `--leak-class` instances), the shortest chain of strong
+references from a GC root to it. Choose the object in the selector; the graph goes from the GC root at the top to the
+object at the bottom, and each node shows the field that points to it.
+
+Node colors come from Shark's `ObjectInspectors` for the JDK:
+
+| Status | Meaning |
+| --- | --- |
+| `NOT_LEAKING` (green) | Shark knows this object is expected to be alive (for example a live thread or a class loader). |
+| `LEAKING` (red) | The suspect itself, or an object Shark knows should have been collected. |
+| `UNKNOWN` (gray) | No rule applies. |
+
+To find a leak, look for the first reference in the path that should not exist, usually a static field, a cache or a
+listener that is never removed.
+
+### GC roots by type
+Count of GC roots per type: `StickyClass` (classes loaded by the bootstrap loader), `JavaFrame` (local variables),
+`ThreadObject`, `JniGlobal`, `MonitorUsed`, etc.
+
+### Threads
+Each thread with its name, daemon flag, priority, retained size and stack trace. Under each frame, `local:` lists the
+objects held by that frame's local variables.
+
+### Duplicate strings
+`String` values that appear more than once, sorted by wasted memory (`(copies - 1) × bytes of one copy`). Strings
+longer than 1024 characters are skipped, and values are cut at 200 characters.
+
+### Largest arrays
+Largest object and primitive arrays with their length, size and retained size.
+
+### ClassLoaders
+Every class loader instance with the number of classes it defined and its retained size. `<bootstrap>` stands for the
+JVM's built-in loader.
+
+## 6. Key concepts
+
+**Shallow size**: memory used by the object itself (its fields, or its elements for an array).
+
+**Retained size**: memory that would be freed if the object were collected. It is the object plus everything that is
+only reachable through it.
+
+**Dominator**: object A dominates object B when every path from a GC root to B goes through A. The retained size of A
+is the sum of the shallow sizes of all objects A dominates.
+
+**GC root**: a reference the garbage collector always treats as alive: local variables of running threads, static
+fields (through their class), JNI references, active monitors, etc.
+
+**Reference strength**: `WeakReference`, `SoftReference` and `PhantomReference` do not keep their target alive, so the
+analyzer ignores them. Objects reachable only through them (for example caches built on `SoftReference`) count as
+unreachable and are not part of any retained size.
+
+**Size convention**: sizes are the byte counts stored in the hprof records (field values and array elements),
+without object headers or alignment padding. They are smaller than what Eclipse MAT or VisualVM report, but
+comparisons between objects and classes are still valid.
+
+## 7. Performance and memory
+
+- Give the JVM about 1.5–2× the dump size: `java -Xmx8g -jar ...` for a 4 GB dump.
+- Reference: a 160 MB dump with 1.6 million objects takes about 40 s (about 20 s with `--no-retained`).
+- The work is mostly single-threaded. The main costs are reading every object once and computing the dominator tree.
+- Each GC root path is a separate search, so a long `--leak-class` list slows the analysis down.
+- The HTML report is about 1.2 MB (ECharts) plus the data; `--top` controls how much data is embedded.
+
+## 8. Languages (i18n)
+
+The `--i18n <code>` option selects the language of the reports (Markdown and HTML) and of the console messages.
+
+| Code | Language |
+| --- | --- |
+| `pt-BR` | Portuguese (Brazil), default |
+| `en` | English |
+
+How the code is resolved:
+
+1. Case and separator are normalized: `pt_br`, `PT-BR` and `pt-BR` are the same.
+2. The exact code is tried first, then just the language: `en-US` uses `en` when there is no `en-US` file.
+3. An unknown code prints a warning and falls back to `pt-BR`.
+4. A key missing from a language file falls back to the `pt-BR` text.
+
+Numbers are formatted for the selected locale (`1,638,523` in English, `1.638.523` in Portuguese).
+
+Class names, GC root types and Shark's status texts are data, not UI text, so they are never translated.
+
+### Adding a language
+
+1. Copy `src/main/resources/i18n/messages_en.properties` to `messages_<code>.properties`, where `<code>` is a
+   [BCP 47](https://www.rfc-editor.org/info/bcp47) language tag (`es`, `fr`, `de`, `pt-PT`...).
+2. Translate the values. Keep the keys and the `{0}`, `{1}` placeholders unchanged.
+3. Save the file as **UTF-8**.
+4. In `cli.usage`, continuation lines start with `\ ` (backslash, space) so that their indentation is kept.
+5. Add the code to the `languages` list in `src/test/kotlin/I18nTest.kt` and run `./gradlew test`. The test fails if
+   the new file is missing a key or has a key that does not exist in `pt-BR`.
+6. Rebuild the jar and run with `--i18n <code>`.
+
+No code change is needed: files are looked up by name at runtime.
+
+Key groups: `cli.*` (usage and errors), `log.*` (progress), `report.*`, `section.*`, `note.*`, `summary.*`, `col.*`
+(table headers), `chart.*`, `paths.*`, `misc.*`.
+
+## 9. Architecture
+
+| File | Role |
+| --- | --- |
+| `src/main/kotlin/Main.kt` | Parses arguments, loads the language, runs the analysis, writes the files. |
+| `src/main/kotlin/Analyzer.kt` | Opens the dump with Shark and builds the `HeapReport` data model. |
+| `src/main/kotlin/Dominators.kt` | Dominator tree algorithm. |
+| `src/main/kotlin/Reports.kt` | Markdown and HTML generation. |
+| `src/main/kotlin/I18n.kt` | Loads language files and formats messages. |
+| `src/main/resources/report.html` | HTML template: CSS and the JavaScript that renders tables and charts. |
+| `src/main/resources/echarts.min.js` | Apache ECharts, embedded in every HTML report. |
+| `src/main/resources/i18n/` | Language files. |
+
+Analysis pipeline:
+
+1. Shark indexes the dump (all GC root types are indexed, not only Shark's default subset).
+2. A single pass over every object builds the class histogram, the duplicate string counts, the class loader list and
+   the reference graph. Weak, soft and phantom referents are skipped, and every instance also references its class.
+3. A virtual root is linked to every GC root, and the dominator tree of the whole graph is computed with the
+   **Semi-NCA** algorithm (Lengauer–Tarjan semidominators and nearest common ancestor). It is iterative and uses only
+   `int` arrays, so it scales to tens of millions of objects. Shark 2.14 has a dominator tree of its own, but it is
+   internal to the library.
+4. Retained sizes are accumulated bottom-up over the tree.
+5. Shark's `HeapAnalyzer` finds the shortest GC root path for each suspect and applies the JDK `ObjectInspectors`.
+6. Thread stack traces are read from the hprof `STACK TRACE` and `STACK FRAME` records.
+7. The `HeapReport` is written as Markdown, or serialized to JSON and embedded in the HTML template together with
+   ECharts and the language strings.
+
+Implementation notes:
+
+- **Shark 2.14 bug workaround**: `HeapGraph.findObjectById` returns a wrong `objectIndex` for primitive arrays, and
+  `findObjectByIndex` fails for them. The analyzer fixes the index (`HeapGraph.indexOf` in `Analyzer.kt`) and keeps
+  its own index-to-id table.
+- **HTML safety**: dump content (strings, class names) is untrusted. It is embedded as JSON with `</` escaped, and the
+  page inserts it with `textContent`, never as HTML.
+
+## 10. Limitations
+
+- Sizes do not include object headers (see [section 6](#6-key-concepts)).
+- Only HotSpot/OpenJDK dumps are tested. Android dumps are readable by Shark but have not been tested.
+- Suspects are chosen by size. The tool does not decide by itself whether something is a leak; the GC root path is
+  what shows it.
+- The class retained size can still count some memory twice when instances of a class dominate each other through
+  objects of another class.
+- Compressed dumps (`.hprof.gz`) must be decompressed first.
+
+## 11. Troubleshooting
+
+| Problem | Solution |
+| --- | --- |
+| `OutOfMemoryError` during the analysis | Increase `-Xmx`, or use `--no-retained`. |
+| Garbled accented characters in the console (Windows) | Run `chcp 65001` first, or add `-Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8` to the `java` command. The report files are always UTF-8. |
+| `Warning: language "xx" not found` | No `messages_xx.properties` file exists; see [adding a language](#adding-a-language). |
+| "Paths to GC roots" is empty | Retained sizes are needed to choose suspects. Remove `--no-retained` or use `--leak-class`. |
+| Big part of the heap is "unreachable" | Usually objects held only by soft/weak references (caches), or garbage in a dump taken with `-all`. |
+| Charts do not appear | Check the browser console. The file must be opened whole; it does not load anything from the network. |

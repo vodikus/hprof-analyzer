@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heap Dump Report</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --text: #0b0b0b; --text-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --seq-2: #86b6ef; --seq-3: #3987e5; --seq-4: #1c5cab;
+  --good: #0ca30c; --critical: #d03b3b; --neutral: #898781;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --text: #ffffff; --text-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --text: #ffffff; --text-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+nav { position: fixed; top: 0; left: 0; bottom: 0; width: 210px; padding: 20px 12px; overflow-y: auto; border-right: 1px solid var(--border); background: var(--surface); }
+nav a { display: block; padding: 5px 10px; border-radius: 6px; color: var(--text-2); text-decoration: none; }
+nav a:hover { background: var(--grid); color: var(--text); }
+nav .brand { font-weight: 600; color: var(--text); margin: 0 10px 12px; }
+main { margin-left: 210px; padding: 24px 32px 64px; max-width: 1400px; }
+h1 { font-size: 22px; margin: 0 0 4px; overflow-wrap: anywhere; }
+h2 { font-size: 17px; margin: 40px 0 12px; scroll-margin-top: 16px; }
+.sub { color: var(--text-2); margin: 0 0 20px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.tile .k { color: var(--text-2); font-size: 12px; }
+.tile .v { font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.chart { width: 100%; height: 440px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; }
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; color: var(--text-2); }
+select { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--axis); border-radius: 6px; padding: 4px 8px; max-width: 100%; }
+.tablewrap { overflow: auto; max-height: 560px; padding: 0; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--text-2); font-weight: 600; cursor: pointer; user-select: none; white-space: nowrap; position: sticky; top: 0; background: var(--surface); }
+th:hover { color: var(--text); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mono { font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+.muted { color: var(--muted); }
+details { border-bottom: 1px solid var(--grid); padding: 6px 0; }
+summary { cursor: pointer; }
+pre { margin: 8px 0; padding: 10px; background: var(--page); border-radius: 6px; overflow-x: auto; font-size: 12px; white-space: pre; }
+.status { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 12px; }
+.status::before { content: "●"; margin-right: 4px; color: var(--c); }
+.note { color: var(--text-2); font-size: 12px; margin-top: -6px; }
+@media (max-width: 900px) {
+  nav { position: static; width: auto; border-right: 0; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; }
+  nav .brand { width: 100%; }
+  main { margin-left: 0; padding: 16px; }
+}
+</style>
+</head>
+<body>
+<nav id="nav"><div class="brand">hprof-analyzer</div></nav>
+<main id="main"></main>
+<script>/*ECHARTS*/</script>
+<script>
+const I18N = /*I18N*/;
+const DATA = /*DATA*/;
+(() => {
+  const t = (key, ...args) => (I18N[key] ?? key).replace(/\{(\d+)\}/g, (m, i) => args[i] ?? m);
+  document.documentElement.lang = LOCALE;
+  const main = document.getElementById('main');
+  const nav = document.getElementById('nav');
+
+  // DOM helper: text always via textContent (heap data is untrusted)
+  function el(tag, attrs, ...kids) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else e.setAttribute(k, v);
+    }
+    for (const k of kids) if (k != null) e.append(k instanceof Node ? k : String(k));
+    return e;
+  }
+  function bytes(b) {
+    if (b == null) return '-';
+    if (b < 1024) return b + ' B';
+    const u = 'KMGTPE'; let v = b, i = -1;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return v.toLocaleString(LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' ' + u[i] + 'iB';
+  }
+  const num = n => n == null ? '-' : n.toLocaleString(LOCALE);
+  const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const short = s => s.length > 48 ? '…' + s.slice(-47) : s;
+
+  function section(id, title, note) {
+    nav.append(el('a', { href: '#' + id, text: title }));
+    const s = el('section', { id }, el('h2', { text: title }));
+    if (note) s.append(el('p', { class: 'note', text: note }));
+    main.append(s);
+    return s;
+  }
+
+  // Sortable table. cols: {h, v: row => raw value, f?: formatter, num?, mono?}
+  function table(cols, rows) {
+    if (!rows.length) return el('p', { class: 'muted', text: t('misc.noData') });
+    const tbody = el('tbody');
+    let sortCol = -1, asc = false;
+    const render = () => tbody.replaceChildren(...rows.map(r => el('tr', null, ...cols.map(c => {
+      const raw = c.v(r);
+      return el('td', { class: c.num ? 'num' : (c.mono ? 'mono' : ''), text: raw == null ? '-' : (c.f ? c.f(raw) : raw) });
+    }))));
+    const head = el('tr', null, ...cols.map((c, i) => {
+      const th = el('th', { text: c.h, title: t('misc.sort') });
+      th.onclick = () => {
+        asc = sortCol === i ? !asc : !c.num;
+        sortCol = i;
+        const key = r => c.v(r) ?? (c.num ? -Infinity : '');
+        rows = [...rows].sort((a, b) => { const x = key(a), y = key(b); return (x < y ? -1 : x > y ? 1 : 0) * (asc ? 1 : -1); });
+        render();
+      };
+      return th;
+    }));
+    render();
+    return el('div', { class: 'card tablewrap' }, el('table', null, el('thead', null, head), tbody));
+  }
+
+  // ---- charts: rebuilt on theme change so colors follow the CSS tokens ----
+  const charts = [];
+  function chart(parent, build, height) {
+    const div = el('div', { class: 'chart' });
+    if (height) div.style.height = height + 'px';
+    parent.append(div);
+    const entry = { div, build, inst: null };
+    charts.push(entry);
+    return entry;
+  }
+  function draw(entry) {
+    if (entry.inst) entry.inst.dispose();
+    entry.inst = echarts.init(entry.div);
+    entry.inst.setOption(entry.build());
+  }
+  const baseText = () => ({ color: css('--text-2'), fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif' });
+  const tooltip = extra => Object.assign({
+    backgroundColor: css('--surface'), borderColor: css('--border'), textStyle: { color: css('--text') }, confine: true,
+  }, extra);
+
+  // Horizontal bar, single series (so no legend); items largest first.
+  function hbar(items, fmt) {
+    const data = [...items].reverse();
+    return {
+      textStyle: baseText(),
+      grid: { left: 12, right: 32, top: 12, bottom: 24, containLabel: true },
+      tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
+        formatter: ps => `${esc(data[ps[0].dataIndex].name)}<br><b>${fmt(ps[0].value)}</b>` }),
+      xAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: fmt }, splitLine: { lineStyle: { color: css('--grid') } } },
+      yAxis: { type: 'category', data: data.map(d => short(d.name)), axisLabel: { color: css('--text-2') },
+               axisLine: { lineStyle: { color: css('--axis') } }, axisTick: { show: false } },
+      series: [{ type: 'bar', data: data.map(d => d.value), barMaxWidth: 16, itemStyle: { color: css('--series-1'), borderRadius: [0, 4, 4, 0] } }],
+    };
+  }
+  const barHeight = n => Math.max(160, n * 24 + 50);
+
+  const s = DATA.summary;
+  const hasRetained = s.reachableBytes != null;
+
+  // ---- Resumo ----
+  document.title = t('report.title', s.file);
+  main.append(el('h1', { text: t('report.title', s.file) }));
+  main.append(el('p', { class: 'sub', text: t('report.subtitle', s.hprofVersion, s.identifierByteSize, s.timestamp, num(s.analysisMillis)) }));
+  const sum = section('summary', t('section.summary'), t('note.sizes'));
+  const tiles = [
+    ['summary.file', bytes(s.fileSize)], ['summary.objects', num(s.objectCount)], ['summary.classes', num(s.classCount)],
+    ['summary.instances', num(s.instanceCount)], ['summary.objectArrays', num(s.objectArrayCount)], ['summary.primitiveArrays', num(s.primitiveArrayCount)],
+    ['summary.gcRoots', num(s.gcRootCount)], ['summary.totalShallow', bytes(s.totalShallow)],
+    ['summary.reachable', num(s.reachableCount)], ['summary.reachableBytes', bytes(s.reachableBytes)],
+  ];
+  sum.append(el('div', { class: 'tiles' }, ...tiles.map(([k, v]) => el('div', { class: 'tile' }, el('div', { class: 'k', text: t(k) }), el('div', { class: 'v', text: v })))));
+
+  // ---- Histograma ----
+  const hist = section('classes', t('section.classes'));
+  const metrics = [['retained', t('col.retained'), bytes], ['shallow', t('col.shallow'), bytes], ['count', t('col.instances'), num]]
+    .filter(m => hasRetained || m[0] !== 'retained');
+  const metricSel = el('select', { 'aria-label': t('chart.metric') }, ...metrics.map(([k, l]) => el('option', { value: k, text: l })));
+  hist.append(el('div', { class: 'toolbar' }, t('chart.topClassesBy'), metricSel));
+  const classChart = chart(hist, () => {
+    const [k, , fmt] = metrics.find(m => m[0] === metricSel.value);
+    return hbar([...DATA.classes].sort((a, b) => b[k] - a[k]).slice(0, 20).map(c => ({ name: c.name, value: c[k] })), fmt);
+  }, barHeight(20));
+  metricSel.onchange = () => draw(classChart);
+  hist.append(table([
+    { h: t('col.class'), v: r => r.name, mono: true },
+    { h: t('col.instances'), v: r => r.count, f: num, num: true },
+    { h: t('col.shallow'), v: r => r.shallow, f: bytes, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+  ], DATA.classes));
+
+  // ---- Pacotes ----
+  const pk = section('packages', t('section.packages'), t('note.packages'));
+  chart(pk, () => hbar(DATA.packages.slice(0, 20).map(p => ({ name: p.name, value: p.shallow })), bytes), barHeight(Math.min(20, DATA.packages.length)));
+  pk.append(table([
+    { h: t('col.package'), v: r => r.name, mono: true },
+    { h: t('col.objects'), v: r => r.count, f: num, num: true },
+    { h: t('col.shallow'), v: r => r.shallow, f: bytes, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+  ], DATA.packages));
+
+  // ---- Dominator treemap ----
+  if (DATA.dominatorTree) {
+    const tm = section('dominators', t('section.dominators'), t('note.dominators'));
+    chart(tm, () => ({
+      textStyle: baseText(),
+      tooltip: tooltip({ formatter: p => `${esc(p.name)}<br><b>${bytes(p.value)}</b>` }),
+      series: [{
+        type: 'treemap', name: 'heap', data: DATA.dominatorTree.children || [], leafDepth: 2, roam: false,
+        top: 8, left: 8, right: 8, bottom: 36,
+        breadcrumb: { bottom: 6, itemStyle: { color: css('--surface'), borderColor: css('--axis'), textStyle: { color: css('--text') } } },
+        label: { color: '#fff', formatter: p => short(p.name) },
+        upperLabel: { show: true, height: 20, color: '#fff', formatter: p => short(p.name) },
+        levels: [
+          { itemStyle: { color: css('--seq-4'), borderColor: css('--surface'), borderWidth: 2, gapWidth: 2 } },
+          { itemStyle: { color: css('--seq-3'), borderColor: css('--seq-4'), borderWidth: 2, gapWidth: 2 } },
+          { itemStyle: { color: css('--seq-2'), borderColor: css('--seq-3'), borderWidth: 1, gapWidth: 1 } },
+        ],
+      }],
+    }), 620);
+  }
+
+  // ---- Maiores objetos ----
+  section('objects', t('section.objects')).append(table([
+    { h: t('col.id'), v: r => r.id, mono: true },
+    { h: t('col.class'), v: r => r.className, mono: true },
+    { h: t('col.shallow'), v: r => r.shallow, f: bytes, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    { h: t('col.detail'), v: r => r.detail, mono: true },
+  ], DATA.retainedObjects));
+
+  // ---- Caminhos GC root → objeto ----
+  const lk = section('paths', t('section.paths'), t('note.paths'));
+  if (DATA.leaks.length) {
+    const statusColor = st => css(st === 'LEAKING' ? '--critical' : st === 'NOT_LEAKING' ? '--good' : '--neutral');
+    const leakSel = el('select', { 'aria-label': t('paths.object') }, ...DATA.leaks.map((l, i) => el('option', { value: i, text: `${i + 1}. ${l.title} (${t('paths.nodes', l.nodes.length)})` })));
+    const legend = ['LEAKING', 'NOT_LEAKING', 'UNKNOWN'].map(st => el('span', { class: 'status', style: '--c:' + statusColor(st), text: st }));
+    lk.append(el('div', { class: 'toolbar' }, t('paths.object'), leakSel, ...legend));
+    const maxNodes = DATA.leaks.reduce((m, l) => Math.max(m, l.nodes.length), 0);
+    const leakChart = chart(lk, () => {
+      const l = DATA.leaks[+leakSel.value];
+      return {
+        textStyle: baseText(),
+        tooltip: tooltip({ formatter: p => p.dataType === 'edge' ? esc(p.data.ref)
+          : `${esc(p.data.full)}<br>${esc(p.data.status)}${p.data.reason ? ': ' + esc(p.data.reason) : ''}` }),
+        series: [{
+          type: 'graph', layout: 'none', roam: true, symbol: 'circle', symbolSize: 16, edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 9,
+          // pixel coordinates (no layout box) keep symbols round
+          label: { show: true, position: 'right', distance: 10, color: css('--text'), lineHeight: 16,
+            formatter: p => (p.data.ref ? '{ref|↓ ' + short(p.data.ref) + '}\n' : '') + short(p.data.full),
+            rich: { ref: { color: css('--text-2'), fontSize: 11 } } },
+          lineStyle: { color: css('--axis'), width: 2, opacity: 1 },
+          data: l.nodes.map((n, i) => ({
+            name: String(i), full: (i === 0 ? '[' + l.gcRoot + '] ' : '') + n.className, ref: n.reference,
+            status: n.status, reason: n.reason, x: 48, y: 40 + i * 80,
+            itemStyle: { color: statusColor(n.status), borderColor: css('--surface'), borderWidth: 2 },
+          })),
+          links: l.nodes.slice(1).map((n, i) => ({ source: String(i), target: String(i + 1), ref: n.reference || '' })),
+        }],
+      };
+    }, Math.max(200, maxNodes * 80 + 20));
+    const detail = el('div');
+    const showDetail = () => {
+      const l = DATA.leaks[+leakSel.value];
+      const lines = [t('paths.gcRoot', l.gcRoot)];
+      l.nodes.forEach(n => {
+        if (n.reference) lines.push('    ↓ ' + n.reference);
+        lines.push(`${n.className}  [${n.type}, ${n.status}${n.labels.length ? ', ' + n.labels.join('; ') : ''}]`);
+      });
+      detail.replaceChildren(el('pre', { class: 'mono', text: lines.join('\n') }));
+    };
+    leakSel.onchange = () => { draw(leakChart); showDetail(); };
+    lk.append(detail);
+    showDetail();
+  } else lk.append(el('p', { class: 'muted', text: t('misc.noData') }));
+
+  // ---- GC roots ----
+  const gr = section('gcroots', t('section.gcRoots'));
+  chart(gr, () => hbar(DATA.gcRoots.map(g => ({ name: g.name, value: g.count })), num), barHeight(DATA.gcRoots.length));
+  gr.append(table([{ h: t('col.type'), v: r => r.name }, { h: t('col.count'), v: r => r.count, f: num, num: true }], DATA.gcRoots));
+
+  // ---- Threads ----
+  const th = section('threads', t('section.threads'));
+  th.append(table([
+    { h: t('col.name'), v: r => r.name, mono: true },
+    { h: t('col.id'), v: r => r.id, mono: true },
+    { h: t('col.daemon'), v: r => r.daemon == null ? null : (r.daemon ? t('misc.yes') : t('misc.no')) },
+    { h: t('col.priority'), v: r => r.priority, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    { h: t('col.frames'), v: r => r.frames.length, num: true },
+  ], DATA.threads));
+  const stacks = el('div', { class: 'card' });
+  DATA.threads.filter(t => t.frames.length).forEach(t => {
+    const text = t.frames.map(f => 'at ' + f.text + f.locals.map(l => '\n      local: ' + l).join('')).join('\n');
+    stacks.append(el('details', null, el('summary', { class: 'mono', text: `${t.name} (${t.frames.length} frames)` }), el('pre', { class: 'mono', text })));
+  });
+  if (stacks.childElementCount) th.append(el('h3', { text: t('section.stacks') }), stacks);
+
+  // ---- Strings / arrays / loaders ----
+  section('strings', t('section.strings')).append(table([
+    { h: t('col.value'), v: r => r.value, f: v => JSON.stringify(v), mono: true },
+    { h: t('col.copies'), v: r => r.count, f: num, num: true },
+    { h: t('col.bytesEach'), v: r => r.bytesEach, f: bytes, num: true },
+    { h: t('col.wasted'), v: r => r.wasted, f: bytes, num: true },
+  ], DATA.duplicateStrings));
+  section('arrays', t('section.arrays')).append(table([
+    { h: t('col.id'), v: r => r.id, mono: true },
+    { h: t('col.type'), v: r => r.className, mono: true },
+    { h: t('col.length'), v: r => r.length, f: num, num: true },
+    { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+  ], DATA.largestArrays));
+  section('loaders', t('section.loaders')).append(table([
+    { h: t('col.id'), v: r => r.id, mono: true },
+    { h: t('col.class'), v: r => r.className, mono: true },
+    { h: t('col.classesLoaded'), v: r => r.classesLoaded, f: num, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+  ], DATA.classLoaders));
+
+  charts.forEach(draw);
+  addEventListener('resize', () => charts.forEach(c => c.inst && c.inst.resize()));
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => charts.forEach(draw));
+})();
+</script>
+</body>
+</html>
