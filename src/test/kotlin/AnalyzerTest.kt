@@ -55,6 +55,14 @@ class AnalyzerTest {
             assertTrue(path.nodes.any { it.reference?.contains("marker") == true }, "path goes through Holder.marker")
             assertTrue(report.threads.any { it.name == "main" || it.frames.isNotEmpty() })
             assertTrue(report.gcRoots.isNotEmpty())
+            assertTrue(report.warnings.isEmpty(), "healthy dump: ${report.warnings}")
+
+            // a failed section is flagged at the top of both reports
+            val warned = report.copy(warnings = listOf("Aviso: \"Caminhos até GC roots\" falhou, seção omitida: boom"))
+            assertContains(toMarkdown(warned), "## Avisos")
+            assertContains(toMarkdown(warned), "boom")
+            assertContains(toHtml(warned), "boom")
+            assertTrue("## Avisos" !in toMarkdown(report))
 
             val md = toMarkdown(report)
             listOf("## Resumo", "## Histograma de classes", "## Caminhos até GC roots", "```mermaid", "## Threads")

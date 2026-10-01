@@ -59,6 +59,9 @@ pre { margin: 8px 0; padding: 10px; background: var(--page); border-radius: 6px;
 .status::before { content: "●"; margin-right: 4px; color: var(--c); }
 .note { color: var(--text-2); font-size: 12px; margin-top: -6px; }
 footer.note { margin-top: 48px; }
+.warn { border-left: 4px solid var(--critical); }
+.warn ul { margin: 0; padding-left: 20px; }
+.warn li { overflow-wrap: anywhere; }
 @media (max-width: 900px) {
   nav { position: static; width: auto; border-right: 0; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; }
   nav .brand { width: 100%; }
@@ -175,6 +178,10 @@ const DATA = /*DATA*/;
   document.title = t('report.title', s.file);
   main.append(el('h1', { text: t('report.title', s.file) }));
   main.append(el('p', { class: 'sub', text: t('report.subtitle', s.hprofVersion, s.identifierByteSize, s.timestamp, num(s.analysisMillis)) }));
+  if (DATA.warnings?.length) {
+    section('warnings', '⚠ ' + t('section.warnings'), t('note.warnings')).append(
+      el('div', { class: 'card warn' }, el('ul', null, ...DATA.warnings.map(w => el('li', { text: w })))));
+  }
   const sum = section('summary', t('section.summary'), t('note.sizes'));
   const tiles = [
     ['summary.file', bytes(s.fileSize)], ['summary.objects', num(s.objectCount)], ['summary.classes', num(s.classCount)],

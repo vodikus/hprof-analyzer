@@ -32,6 +32,12 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
 
     val s = r.summary
     appendLine("# ${md(msg["report.title", s.file])}\n")
+    if (r.warnings.isNotEmpty()) {
+        section("section.warnings")
+        appendLine("> ${msg["note.warnings"]}\n")
+        r.warnings.forEach { appendLine("- ⚠️ ${md(it)}") }
+        appendLine()
+    }
     section("section.summary")
     table(listOf("summary.metric", "summary.value"), listOf(
         listOf(msg["summary.file"], "${s.file} (${b(s.fileSize)})"),

@@ -44,6 +44,8 @@ data class HeapReport(
     val duplicateStrings: List<DupString>,
     val largestArrays: List<ArrayStat>,
     val classLoaders: List<LoaderStat>,
+    /** Problems hit while analyzing; the affected sections are empty or partial. */
+    val warnings: List<String> = emptyList(),
 )
 
 @Serializable
@@ -326,49 +328,69 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             }
             .sortedByDescending { it.shallow }
 
-        val topRetained = if (dom != null) topN(top, dom.order.asSequence().drop(1)) { retained!![it] } else emptyList()
-        val retainedObjects = topRetained.map { idx ->
-            val o = graph.findObjectById(ids[idx])
-            ObjectStat(hex(o.objectId), o.label(), shallow[idx], retained!![idx], o.detail())
+        // From here on each section is independent: a failure (e.g. an inconsistent dump) becomes a
+        // report warning and an empty section instead of losing the whole analysis.
+        val warnings = ArrayList<String>()
+        fun <T> guard(section: String, fallback: T, block: () -> T): T = try { block() } catch (e: Exception) {
+            val w = opt.msg["warn.section", opt.msg[section], e.toString()]
+            opt.log(w); warnings.add(w); fallback
         }
-        val tree = dom?.let { buildTree(graph, ids, it, retained!!) }
+
+        val topRetained = if (dom != null) topN(top, dom.order.asSequence().drop(1)) { retained!![it] } else emptyList()
+        val retainedObjects = guard("section.objects", emptyList()) {
+            topRetained.map { idx ->
+                val o = graph.findObjectById(ids[idx])
+                ObjectStat(hex(o.objectId), o.label(), shallow[idx], retained!![idx], o.detail())
+            }
+        }
+        val tree = guard("section.dominators", null) { dom?.let { buildTree(graph, ids, it, retained!!) } }
 
         // ---- leaks / paths to GC roots (Shark HeapAnalyzer) ----
-        val suspects = LinkedHashSet(leakIds)
-        // class objects are GC roots themselves (trivial path), so skip them
-        topRetained.asSequence().map { graph.findObjectById(ids[it]) }.filter { it !is HeapClass }
-            .take(SUSPECTS).forEach { suspects.add(it.objectId) }
-        opt.log(opt.msg["log.paths", suspects.size])
-        val leaks = findPaths(file, graph, suspects, opt)
-
-        // ---- GC roots / threads ----
-        val gcRoots = graph.gcRoots.groupingBy { it::class.simpleName ?: "?" }.eachCount()
-            .map { NamedCount(it.key, it.value) }.sortedByDescending { it.count }
-        opt.log(opt.msg["log.threads"])
-        val threads = readThreads(file, graph, retained)
-
-        // ---- strings / arrays / class loaders ----
-        val duplicateStrings = topN(top, strings.entries.asSequence().filter { it.value.count > 1 }) {
-            (it.value.count - 1) * it.value.bytes
-        }.map { DupString(it.key.take(MAX_STRING_SHOWN), it.value.count, it.value.bytes, (it.value.count - 1) * it.value.bytes) }
-
-        val arrays = topN(top, (graph.objectArrays + graph.primitiveArrays).map { it.objectIndex }) { shallow[it] }.map { idx ->
-            val o = graph.findObjectById(ids[idx])
-            val length = when (o) {
-                is HeapObjectArray -> o.byteSize / graph.identifierByteSize
-                is HeapPrimitiveArray -> o.byteSize / o.primitiveType.byteSize
-                else -> 0
-            }
-            ArrayStat(hex(o.objectId), o.className(), length, shallow[idx], retained?.get(idx))
+        val leaks = guard("section.paths", emptyList()) {
+            val suspects = LinkedHashSet(leakIds)
+            // class objects are GC roots themselves (trivial path), so skip them
+            topRetained.asSequence().map { graph.findObjectById(ids[it]) }.filter { it !is HeapClass }
+                .take(SUSPECTS).forEach { suspects.add(it.objectId) }
+            opt.log(opt.msg["log.paths", suspects.size])
+            findPaths(file, graph, suspects, opt, warnings)
         }
 
-        val classLoaders = buildList {
-            classesPerLoader[0L]?.let { add(LoaderStat("0x0", "<bootstrap>", it, null)) }
-            for (id in loaderIds) {
-                val o = graph.findObjectById(id)
-                add(LoaderStat(hex(id), o.className(), classesPerLoader[id] ?: 0, retained?.get(graph.indexOf(o))))
+        // ---- GC roots / threads ----
+        val gcRoots = guard("section.gcRoots", emptyList()) {
+            graph.gcRoots.groupingBy { it::class.simpleName ?: "?" }.eachCount()
+                .map { NamedCount(it.key, it.value) }.sortedByDescending { it.count }
+        }
+        opt.log(opt.msg["log.threads"])
+        val threads = guard("section.threads", emptyList()) { readThreads(file, graph, retained) }
+
+        // ---- strings / arrays / class loaders ----
+        val duplicateStrings = guard("section.strings", emptyList()) {
+            topN(top, strings.entries.asSequence().filter { it.value.count > 1 }) {
+                (it.value.count - 1) * it.value.bytes
+            }.map { DupString(it.key.take(MAX_STRING_SHOWN), it.value.count, it.value.bytes, (it.value.count - 1) * it.value.bytes) }
+        }
+
+        val arrays = guard("section.arrays", emptyList()) {
+            topN(top, (graph.objectArrays + graph.primitiveArrays).map { it.objectIndex }) { shallow[it] }.map { idx ->
+                val o = graph.findObjectById(ids[idx])
+                val length = when (o) {
+                    is HeapObjectArray -> o.byteSize / graph.identifierByteSize
+                    is HeapPrimitiveArray -> o.byteSize / o.primitiveType.byteSize
+                    else -> 0
+                }
+                ArrayStat(hex(o.objectId), o.className(), length, shallow[idx], retained?.get(idx))
             }
-        }.sortedByDescending { it.classesLoaded }
+        }
+
+        val classLoaders = guard("section.loaders", emptyList()) {
+            buildList {
+                classesPerLoader[0L]?.let { add(LoaderStat("0x0", "<bootstrap>", it, null)) }
+                for (id in loaderIds) {
+                    val o = graph.findObjectById(id)
+                    add(LoaderStat(hex(id), o.className(), classesPerLoader[id] ?: 0, retained?.get(graph.indexOf(o))))
+                }
+            }.sortedByDescending { it.classesLoaded }
+        }
 
         val summary = Summary(
             file = file.name,
@@ -389,7 +411,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             toolVersion = VERSION,
         )
         return HeapReport(summary, classes, packages, retainedObjects, tree, leaks, gcRoots, threads,
-            duplicateStrings, arrays, classLoaders)
+            duplicateStrings, arrays, classLoaders, warnings)
     }
 }
 
@@ -413,21 +435,33 @@ private fun buildTree(graph: HeapGraph, ids: LongArray, dom: Dominators, retaine
     return node(n, 0)
 }
 
-private fun findPaths(file: File, graph: HeapGraph, suspects: Set<Long>, opt: Options): List<LeakPath> {
+private fun findPaths(
+    file: File, graph: HeapGraph, suspects: Set<Long>, opt: Options, warnings: MutableList<String>,
+): List<LeakPath> {
     val analyzer = HeapAnalyzer(OnAnalysisProgressListener.NO_OP)
     val matchers = listOf(IgnoredReferenceMatcher(InstanceFieldPattern("java.lang.ref.Reference", "referent")))
+    fun warn(id: Long, e: Throwable) {
+        val w = opt.msg["log.analyzerFailed", hex(id), e.toString()]
+        opt.log(w); warnings.add(w)
+    }
     // ponytail: one BFS per suspect; a single analyze() drops paths that pass through another suspect.
     return suspects.flatMap { id ->
-        val analysis = analyzer.analyze(
-            heapDumpFile = file,
-            graph = graph,
-            leakingObjectFinder = LeakingObjectFinder { setOf(id) },
-            referenceMatchers = matchers,
-            computeRetainedHeapSize = false,
-            objectInspectors = ObjectInspectors.jdkDefaults,
-        )
+        // Shark can throw before its own try (e.g. class name indexed but CLASS_DUMP missing from the dump)
+        val analysis = try {
+            analyzer.analyze(
+                heapDumpFile = file,
+                graph = graph,
+                leakingObjectFinder = LeakingObjectFinder { setOf(id) },
+                referenceMatchers = matchers,
+                computeRetainedHeapSize = false,
+                objectInspectors = ObjectInspectors.jdkDefaults,
+            )
+        } catch (e: Exception) {
+            warn(id, e)
+            return@flatMap emptyList()
+        }
         if (analysis is HeapAnalysisFailure) {
-            opt.log(opt.msg["log.analyzerFailed", hex(id), analysis.exception.message])
+            warn(id, analysis.exception)
             return@flatMap emptyList()
         }
         (analysis as HeapAnalysisSuccess).allLeaks.flatMap { it.leakTraces }.map { trace ->
