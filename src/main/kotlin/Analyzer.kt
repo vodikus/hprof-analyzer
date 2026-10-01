@@ -64,6 +64,7 @@ data class Summary(
     val reachableCount: Int?,
     val reachableBytes: Long?,
     val analysisMillis: Long,
+    val toolVersion: String,
 )
 
 @Serializable
@@ -385,6 +386,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             reachableCount = dom?.let { it.order.size - 1 },
             reachableBytes = retained?.get(n),
             analysisMillis = System.currentTimeMillis() - start,
+            toolVersion = VERSION,
         )
         return HeapReport(summary, classes, packages, retainedObjects, tree, leaks, gcRoots, threads,
             duplicateStrings, arrays, classLoaders)

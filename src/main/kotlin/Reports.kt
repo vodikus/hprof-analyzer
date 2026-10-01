@@ -112,6 +112,8 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
     section("section.loaders")
     table(listOf("col.id", "col.class", "col.classesLoaded", "col.retained"),
         r.classLoaders.map { listOf(it.id, it.className, n(it.classesLoaded), b(it.retained)) })
+
+    appendLine("---\n\n_${msg["report.generatedBy", s.toolVersion]}_")
 }
 
 private fun resource(name: String) =

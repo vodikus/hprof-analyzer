@@ -64,6 +64,9 @@ class AnalyzerTest {
             assertContains(html, "echarts")
             assertTrue("/*DATA*/" !in html && "/*ECHARTS*/" !in html)
             assertContains(html, "LOCALE = \"pt-BR\"")
+            assertTrue(Regex("""\d+\.\d+\.\d+""").matches(VERSION), "version from build.gradle.kts: $VERSION")
+            assertEquals(VERSION, report.summary.toolVersion)
+            assertContains(md, "hprof-analyzer $VERSION")
 
             val en = Messages.load("en")
             val mdEn = toMarkdown(report, en)

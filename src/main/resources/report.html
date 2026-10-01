@@ -58,6 +58,7 @@ pre { margin: 8px 0; padding: 10px; background: var(--page); border-radius: 6px;
 .status { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 12px; }
 .status::before { content: "●"; margin-right: 4px; color: var(--c); }
 .note { color: var(--text-2); font-size: 12px; margin-top: -6px; }
+footer.note { margin-top: 48px; }
 @media (max-width: 900px) {
   nav { position: static; width: auto; border-right: 0; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; }
   nav .brand { width: 100%; }
@@ -329,6 +330,8 @@ const DATA = /*DATA*/;
     { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
   ], DATA.classLoaders));
 
+  main.append(el('footer', { class: 'note', text: t('report.generatedBy', s.toolVersion) }));
+  nav.querySelector('.brand').textContent = 'hprof-analyzer ' + s.toolVersion;
   charts.forEach(draw);
   addEventListener('resize', () => charts.forEach(c => c.inst && c.inst.resize()));
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => charts.forEach(draw));

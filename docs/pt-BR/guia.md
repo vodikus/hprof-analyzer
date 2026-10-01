@@ -69,9 +69,12 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [opções]
 | `--no-retained` | desligado | Pula a dominator tree. Cerca de 2× mais rápido e usa menos memória, mas ficam vazios os retained sizes, o treemap e a seção de maiores objetos, e os caminhos até GC root só são calculados para `--leak-class`. |
 | `--leak-class a.B,c.D` | — | Nomes completos de classes. Até 20 instâncias dessas classes ganham caminho até GC root, além dos 10 maiores objetos. |
 | `--i18n <código>` | `pt-BR` | Idioma dos relatórios e das mensagens do console. Veja a [seção 8](#8-idiomas-i18n). |
-| `-h`, `--help` | — | Mostra o uso (no idioma de `--i18n`). |
+| `-h`, `--help` | — | Mostra a versão e o uso (no idioma de `--i18n`). |
+| `-V`, `--version` | — | Mostra a versão (`hprof-analyzer 1.0.0`) e sai. |
 
-O progresso sai no stderr; os caminhos dos arquivos gerados saem no stdout. Argumentos inválidos encerram com
+A primeira linha no stderr é o nome e a versão da ferramenta, seguida do progresso; os caminhos dos arquivos gerados
+saem no stdout. A versão também aparece no rodapé dos relatórios ("Gerado por hprof-analyzer 1.0.0") e no menu
+lateral do HTML. Argumentos inválidos encerram com
 código 2.
 
 Exemplos:
@@ -231,6 +234,9 @@ Grupos de chaves: `cli.*` (uso e erros), `log.*` (progresso), `report.*`, `secti
 | `src/main/resources/report.html` | Template HTML: CSS e o JavaScript que desenha tabelas e gráficos. |
 | `src/main/resources/echarts.min.js` | Apache ECharts, embutido em todo relatório HTML. |
 | `src/main/resources/i18n/` | Arquivos de idioma. |
+| `src/main/resources/version.properties` | Preenchido no build com o `version` do `build.gradle.kts`; lido por `VERSION` em `Main.kt`. |
+
+Para lançar uma nova versão, altere `version` no `build.gradle.kts`; o número não fica em nenhum outro lugar.
 
 Etapas da análise:
 

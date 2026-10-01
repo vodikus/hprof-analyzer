@@ -1,9 +1,17 @@
 package hprof
 
 import java.io.File
+import java.util.Properties
 import kotlin.system.exitProcess
 
+/** Filled from build.gradle.kts `version` at build time (see processResources). */
+val VERSION: String = Messages::class.java.getResourceAsStream("/version.properties")
+    ?.use { Properties().apply { load(it) }.getProperty("version") } ?: "dev"
+
+private val NAME_VERSION = "hprof-analyzer $VERSION"
+
 fun main(args: Array<String>) {
+    if ("--version" in args || "-V" in args) { println(NAME_VERSION); return }
     // language first, so usage and errors come out in it
     val langAt = args.indexOf("--i18n")
     val msg = Messages.load(args.getOrNull(langAt + 1)?.takeIf { langAt >= 0 } ?: Messages.DEFAULT)
@@ -11,7 +19,7 @@ fun main(args: Array<String>) {
         System.err.println(msg["cli.error", text] + "\n\n" + msg["cli.usage"])
         exitProcess(2)
     }
-    if (args.isEmpty() || "-h" in args || "--help" in args) { println(msg["cli.usage"]); return }
+    if (args.isEmpty() || "-h" in args || "--help" in args) { println(NAME_VERSION + "\n\n" + msg["cli.usage"]); return }
 
     var input: File? = null
     var out = File(".")
@@ -37,6 +45,7 @@ fun main(args: Array<String>) {
     val unknown = formats - setOf("html", "md")
     if (unknown.isNotEmpty()) fail(msg["cli.unknownFormat", unknown])
 
+    System.err.println(NAME_VERSION)
     val report = analyze(file, Options(top, retained, leakClasses, msg))
     out.mkdirs()
     val base = file.nameWithoutExtension

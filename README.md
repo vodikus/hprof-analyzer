@@ -40,6 +40,7 @@ Open `report/app.html` in a browser, or read `report/app.md`.
 | `--no-retained` | Skip the dominator tree: faster and uses less memory, but no retained sizes |
 | `--leak-class a.B,c.D` | Also find GC root paths for instances of these classes |
 | `--i18n <code>` | Report and message language (default `pt-BR`; available: `pt-BR`, `en`) |
+| `--version`, `-V` | Print the version |
 
 Give the JVM about 1.5–2× the dump size (`-Xmx`).
 
