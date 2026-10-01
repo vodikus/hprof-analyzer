@@ -15,6 +15,12 @@ fun bytes(b: Long?, locale: Locale = Locale.ROOT): String {
 
 private fun md(s: String) = s.replace("|", "\\|").replace("\n", " ").replace("`", "'")
 
+/** System properties shown up front; the rest goes in a collapsed table. */
+private val KEY_PROPS = listOf(
+    "java.version", "java.vendor", "java.vm.name", "java.vm.version", "java.runtime.version", "os.name", "os.version",
+    "os.arch", "user.dir", "user.timezone", "file.encoding", "java.home", "sun.java.command",
+)
+
 private fun mermaidLabel(s: String) = s.replace("\"", "#quot;").replace("<", "#lt;").replace(">", "#gt;")
 
 fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildString {
@@ -32,6 +38,7 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
 
     val s = r.summary
     appendLine("# ${md(msg["report.title", s.file])}\n")
+    r.appScope?.let { appendLine("> ${md(msg["report.appScope", it])}\n") }
     if (r.warnings.isNotEmpty()) {
         section("section.warnings")
         appendLine("> ${msg["note.warnings"]}\n")
@@ -56,6 +63,35 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         listOf(msg["summary.analysisTime"], "${n(s.analysisMillis)} ms"),
     ))
     appendLine("> ${msg["note.sizes"]}\n")
+
+    section("section.jvm")
+    appendLine("**${msg["jvm.frameworks"]}:** ${md(r.frameworks.joinToString().ifEmpty { msg["jvm.none"] })}\n")
+    table(listOf("col.property", "col.value"), KEY_PROPS.mapNotNull { k -> r.jvm[k]?.let { listOf(k, it) } })
+    appendLine("**${msg["jvm.vmArgs"]}:**\n")
+    if (r.vmArgs.isEmpty()) appendLine("_${msg["note.vmArgs"]}_\n")
+    else appendLine("```\n${r.vmArgs.joinToString("\n")}\n```\n")
+    if (r.jvm.isNotEmpty()) {
+        appendLine("<details><summary>${msg["jvm.allProps", r.jvm.size]}</summary>\n")
+        table(listOf("col.property", "col.value"), r.jvm.map { listOf(it.key, it.value) })
+        appendLine("</details>\n")
+    }
+
+    r.proxies?.let { p ->
+        section("section.proxies")
+        appendLine("${msg["note.proxies"]}\n")
+        val pct = if (s.classCount > 0) String.format(msg.locale, "%.1f", 100.0 * p.generatedClasses / s.classCount) else "0"
+        appendLine("**${msg["proxies.total", n(p.generatedClasses), pct]}** " +
+            p.byGenerator.joinToString(" · ") { "${it.name}: ${n(it.count)}" } + "\n")
+        val suspects = p.groups.filter { it.suspect }
+        if (suspects.isNotEmpty()) {
+            appendLine("> ⚠️ **${msg["proxies.suspects", suspects.size]}**")
+            suspects.forEach { appendLine("> - ${md(it.generator)} · `${md(it.baseClass)}`: ${n(it.classes)} classes, ${n(it.loaders)} loaders") }
+            appendLine(">\n> ${msg["note.proxiesTip"]}\n")
+        }
+        table(listOf("col.generator", "col.baseClass", "col.classes", "col.loaders", "col.instances", "col.example", "col.suspect"),
+            p.groups.map { listOf(it.generator, it.baseClass, n(it.classes), n(it.loaders), n(it.instances), it.example,
+                if (it.suspect) "⚠️ ${msg["misc.yes"]}" else msg["misc.no"]) })
+    }
 
     section("section.classes")
     table(listOf("col.class", "col.instances", "col.shallow", "col.retained"),
@@ -89,8 +125,11 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         appendLine("```\n")
     }
 
-    section("section.gcRoots")
-    table(listOf("col.type", "col.count"), r.gcRoots.map { listOf(it.name, n(it.count)) })
+    val full = r.appScope == null // the application view drops sections that cannot be split by class
+    if (full) {
+        section("section.gcRoots")
+        table(listOf("col.type", "col.count"), r.gcRoots.map { listOf(it.name, n(it.count)) })
+    }
 
     section("section.threads")
     table(listOf("col.name", "col.id", "col.daemon", "col.priority", "col.retained", "col.frames"),
@@ -107,17 +146,21 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         appendLine("```\n</details>\n")
     }
 
-    section("section.strings")
-    table(listOf("col.value", "col.copies", "col.bytesEach", "col.wasted"),
-        r.duplicateStrings.map { listOf("\"${it.value}\"", n(it.count), b(it.bytesEach), b(it.wasted)) })
+    if (full) {
+        section("section.strings")
+        table(listOf("col.value", "col.copies", "col.bytesEach", "col.wasted"),
+            r.duplicateStrings.map { listOf("\"${it.value}\"", n(it.count), b(it.bytesEach), b(it.wasted)) })
+    }
 
     section("section.arrays")
     table(listOf("col.id", "col.type", "col.length", "col.bytes", "col.retained"),
         r.largestArrays.map { listOf(it.id, it.className, n(it.length), b(it.bytes), b(it.retained)) })
 
-    section("section.loaders")
-    table(listOf("col.id", "col.class", "col.classesLoaded", "col.retained"),
-        r.classLoaders.map { listOf(it.id, it.className, n(it.classesLoaded), b(it.retained)) })
+    if (full) {
+        section("section.loaders")
+        table(listOf("col.id", "col.class", "col.classesLoaded", "col.retained"),
+            r.classLoaders.map { listOf(it.id, it.className, n(it.classesLoaded), b(it.retained)) })
+    }
 
     appendLine("---\n\n_${msg["report.generatedBy", s.toolVersion]}_")
 }

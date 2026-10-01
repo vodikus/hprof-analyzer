@@ -11,6 +11,9 @@ and produces a self-contained **HTML** report (interactive charts, works offline
 - Shortest path from a GC root to the biggest objects (graph view), with Shark's leak-status heuristics
 - GC roots by type, threads with stack traces and the local variables of each frame
 - Duplicate strings, largest arrays, class loaders
+- Generated classes / proxies (ByteBuddy, Hibernate, CGLIB, Mockito, Javassist, JDK Proxy) per base class, flagging uncached proxies that fill the metaspace
+- JVM environment (version, OS, command line, system properties) and detected frameworks
+- Extra `<dump>-app` report with only your application's classes, auto-detected (`--app-package` to override)
 - Localized reports and messages (`--i18n`): Portuguese (pt-BR, default) and English (en)
 
 ## Requirements
@@ -39,6 +42,7 @@ Open `report/app.html` in a browser, or read `report/app.md`.
 | `--top <n>` | Rows per table (default 50) |
 | `--no-retained` | Skip the dominator tree: faster and uses less memory, but no retained sizes |
 | `--leak-class a.B,c.D` | Also find GC root paths for instances of these classes |
+| `--app-package a.b,c.d` | Application packages for the `-app` report (default: auto-detect) |
 | `--i18n <code>` | Report and message language (default `pt-BR`; available: `pt-BR`, `en`) |
 | `--version`, `-V` | Print the version |
 

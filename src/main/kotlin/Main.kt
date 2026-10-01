@@ -27,6 +27,7 @@ fun main(args: Array<String>) {
     var top = 50
     var retained = true
     var leakClasses = emptySet<String>()
+    var appPackages = emptySet<String>()
     val it = args.iterator()
     fun value(flag: String) = if (it.hasNext()) it.next() else fail(msg["cli.missingValue", flag])
     while (it.hasNext()) {
@@ -36,6 +37,7 @@ fun main(args: Array<String>) {
             "--top" -> top = value(a).toIntOrNull()?.takeIf { n -> n > 0 } ?: fail(msg["cli.topInvalid"])
             "--no-retained" -> retained = false
             "--leak-class" -> leakClasses = value(a).split(',').map(String::trim).filter(String::isNotEmpty).toSet()
+            "--app-package" -> appPackages = value(a).split(',').map { p -> p.trim().removeSuffix(".") }.filter(String::isNotEmpty).toSet()
             "--i18n" -> value(a) // already handled
             else -> if (a.startsWith("--") || input != null) fail(msg["cli.unknownArg", a]) else input = File(a)
         }
@@ -46,9 +48,12 @@ fun main(args: Array<String>) {
     if (unknown.isNotEmpty()) fail(msg["cli.unknownFormat", unknown])
 
     System.err.println(NAME_VERSION)
-    val report = analyze(file, Options(top, retained, leakClasses, msg))
+    val report = analyze(file, Options(top, retained, leakClasses, appPackages, msg))
     out.mkdirs()
-    val base = file.nameWithoutExtension
-    if ("md" in formats) File(out, "$base.md").also { f -> f.writeText(toMarkdown(report, msg)); println(f.path) }
-    if ("html" in formats) File(out, "$base.html").also { f -> f.writeText(toHtml(report, msg)); println(f.path) }
+    fun write(r: HeapReport, base: String) {
+        if ("md" in formats) File(out, "$base.md").also { f -> f.writeText(toMarkdown(r, msg)); println(f.path) }
+        if ("html" in formats) File(out, "$base.html").also { f -> f.writeText(toHtml(r, msg)); println(f.path) }
+    }
+    write(report, file.nameWithoutExtension)
+    if (report.app?.classes?.isNotEmpty() == true) write(report.appOnly(), file.nameWithoutExtension + "-app")
 }

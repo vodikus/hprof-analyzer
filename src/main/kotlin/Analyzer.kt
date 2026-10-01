@@ -1,6 +1,7 @@
 package hprof
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import shark.GcRoot
 import shark.HeapAnalysisFailure
 import shark.HeapAnalysisSuccess
@@ -46,7 +47,52 @@ data class HeapReport(
     val classLoaders: List<LoaderStat>,
     /** Problems hit while analyzing; the affected sections are empty or partial. */
     val warnings: List<String> = emptyList(),
+    /** System properties of the dumped JVM (java.lang.System.props). */
+    val jvm: Map<String, String> = emptyMap(),
+    /** JVM input arguments; only in the heap if something called RuntimeMXBean.getInputArguments(). */
+    val vmArgs: List<String> = emptyList(),
+    val frameworks: List<String> = emptyList(),
+    /** Set only in the application-only report (see [appOnly]): which classes count as application. */
+    val appScope: String? = null,
+    /** Runtime-generated classes (proxies) per generator and base class; null if the section failed. */
+    val proxies: ProxyReport? = null,
+    /** Sections restricted to application classes; rendered as a separate report, not embedded. */
+    @Transient val app: AppView? = null,
 )
+
+@Serializable
+data class ProxyGroup(
+    val generator: String,
+    val baseClass: String,
+    val classes: Int,
+    /** Distinct defining class loaders. */
+    val loaders: Int,
+    val instances: Long,
+    val example: String,
+    val suspect: Boolean,
+)
+
+@Serializable
+data class ProxyReport(val generatedClasses: Int, val byGenerator: List<NamedCount>, val groups: List<ProxyGroup>)
+
+class AppView(
+    val scope: String,
+    val classes: List<ClassStat>,
+    val packages: List<PackageStat>,
+    val retainedObjects: List<ObjectStat>,
+    val largestArrays: List<ArrayStat>,
+    val leaks: List<LeakPath>,
+    val threads: List<ThreadInfo>,
+    val proxies: ProxyReport?,
+)
+
+/** Same report, only application classes; sections that cannot be split by class are dropped. */
+fun HeapReport.appOnly(): HeapReport {
+    val a = app ?: error("no application view")
+    return copy(classes = a.classes, packages = a.packages, retainedObjects = a.retainedObjects, dominatorTree = null,
+        leaks = a.leaks, gcRoots = emptyList(), threads = a.threads, duplicateStrings = emptyList(),
+        largestArrays = a.largestArrays, classLoaders = emptyList(), proxies = a.proxies, appScope = a.scope, app = null)
+}
 
 @Serializable
 data class Summary(
@@ -124,6 +170,8 @@ class Options(
     val top: Int = 50,
     val retained: Boolean = true,
     val leakClasses: Set<String> = emptySet(),
+    /** Application package prefixes; empty = auto-detect (see [detectAppPrefixes]). */
+    val appPackages: Set<String> = emptySet(),
     val msg: Messages = Messages.load(),
     val log: (String) -> Unit = { System.err.println(it) },
 )
@@ -193,6 +241,145 @@ private fun HeapInstance.threadField(name: String) =
     this["java.lang.Thread", name]?.value
         ?: this["java.lang.Thread", "holder"]?.valueAsInstance?.get("java.lang.Thread\$FieldHolder", name)?.value
 
+private fun HeapInstance.field(name: String) = readFields().firstOrNull { it.name == name }?.value
+
+private fun HeapInstance.refField(name: String) = field(name)?.asObject
+
+/** Entries of a Properties / Hashtable / HashMap / ConcurrentHashMap (JDK 8+): walks `table` buckets via `next`. */
+private fun readMap(map: HeapInstance): Map<String, String> {
+    map.refField("map")?.asInstance?.let { return readMap(it) } // JDK 9+ Properties wraps a ConcurrentHashMap
+    val out = HashMap<String, String>()
+    val table = map.refField("table")?.asObjectArray ?: return out
+    for (bucket in table.readElements()) {
+        var e = bucket.asObject?.asInstance
+        var hops = 0
+        while (e != null && hops++ < 10_000) { // bound: a corrupt dump could loop
+            val k = e.field("key")?.readAsJavaString()
+            val v = (e.field("val") ?: e.field("value"))?.readAsJavaString()
+            if (k != null && v != null) out[k] = v
+            e = e.refField("next")?.asInstance
+        }
+    }
+    return out
+}
+
+/** ArrayList / Arrays.asList / List.of, optionally behind Collections.unmodifiableList. */
+private fun readList(list: HeapInstance): List<String> {
+    list.refField("list")?.asInstance?.let { return readList(it) }
+    val array = (list.refField("elementData") ?: list.refField("a") ?: list.refField("elements"))?.asObjectArray
+    return array?.readElements()?.mapNotNull { it.readAsJavaString() }?.toList().orEmpty()
+}
+
+private fun readSystemProps(graph: HeapGraph): Map<String, String> {
+    val props = graph.findClassByName("java.lang.System")?.get("props")?.valueAsInstance
+        ?: graph.findClassByName("jdk.internal.misc.VM")?.get("savedProps")?.valueAsInstance
+        ?: return emptyMap()
+    return readMap(props).toSortedMap()
+}
+
+// ponytail: -Xmx & co. live in native memory; the heap only has them if RuntimeMXBean.getInputArguments() was called.
+private fun readVmArgs(graph: HeapGraph): List<String> =
+    graph.findClassByName("sun.management.VMManagementImpl")?.instances
+        ?.firstNotNullOfOrNull { vm -> vm.refField("vmArgs")?.asInstance?.let(::readList)?.ifEmpty { null } }
+        .orEmpty()
+
+/** Framework name to a class that is only loaded when the framework is in use. */
+private val FRAMEWORKS = listOf(
+    "Spring Boot" to "org.springframework.boot.SpringApplication",
+    "Spring Framework" to "org.springframework.context.ApplicationContext",
+    "Quarkus" to "io.quarkus.runtime.Application",
+    "Micronaut" to "io.micronaut.context.ApplicationContext",
+    "WildFly / JBoss" to "org.jboss.as.server.Main",
+    "Jakarta Servlet" to "jakarta.servlet.Servlet",
+    "Java Servlet (javax)" to "javax.servlet.Servlet",
+    "Tomcat" to "org.apache.catalina.core.StandardServer",
+    "Jetty" to "org.eclipse.jetty.server.Server",
+    "Undertow" to "io.undertow.Undertow",
+    "Netty" to "io.netty.channel.Channel",
+    "Vert.x" to "io.vertx.core.Vertx",
+    "Hibernate" to "org.hibernate.SessionFactory",
+    "Ktor" to "io.ktor.server.application.Application",
+    "Kotlin" to "kotlin.Unit",
+    "Scala" to "scala.Predef",
+    "Groovy" to "groovy.lang.GroovyObject",
+)
+
+// ponytail: fixed list of JDK/language/framework/library roots; unknown third-party libs count as application
+// in auto mode. --app-package (or a main class outside these roots) gives the exact view.
+private val LIB_PREFIXES = listOf(
+    "java", "javax", "jakarta", "jdk", "sun", "com.sun", "org.jcp", "org.w3c", "org.xml", "org.ietf", "kotlin", "kotlinx", "scala", "groovy", "org.codehaus.groovy",
+    "org.springframework", "org.apache", "org.hibernate", "io.netty", "io.quarkus", "io.smallrye", "io.micronaut",
+    "io.vertx", "io.undertow", "org.xnio", "org.jboss", "org.wildfly", "org.eclipse", "org.glassfish", "com.fasterxml",
+    "ch.qos.logback", "org.slf4j", "io.micrometer", "reactor", "io.projectreactor", "com.google", "net.bytebuddy",
+    "org.aspectj", "com.zaxxer", "org.postgresql", "com.mysql", "oracle", "org.h2", "org.hsqldb", "com.mongodb",
+    "io.lettuce", "redis.clients", "io.grpc", "io.opentelemetry", "io.prometheus", "okhttp3", "okio", "com.squareup",
+    "org.yaml", "org.objectweb", "org.json", "org.joda", "com.github.benmanes", "io.ktor", "org.jetbrains",
+    "org.intellij", "org.gradle", "worker.org.gradle", "net.rubygrapefruit", "org.junit", "org.opentest4j", "com.esotericsoftware", "shark",
+).map { "$it." }
+
+internal fun isLibraryClass(name: String) = LIB_PREFIXES.any { name.startsWith(it) }
+
+/**
+ * Application class: matches [prefixes], or (when empty) is outside [LIB_PREFIXES]. Primitive arrays,
+ * default-package classes and generated classes (`$$Lambda`, `$$SpringCGLIB$$`, ByteBuddy...) never are.
+ * Arrays count by element type.
+ */
+internal fun isAppClass(name: String, prefixes: Collection<String>): Boolean {
+    val base = name.substringBefore('[')
+    if ('.' !in base || "$$" in base || generatedOf(base) != null) return false
+    return if (prefixes.isEmpty()) !isLibraryClass(base) else prefixes.any { base.startsWith("$it.") }
+}
+
+internal class Generated(val generator: String, val base: String)
+
+const val JDK_PROXY = "JDK Proxy"
+
+/** Name marker of each class generator; the generated class is named `<base><marker><suffix>`. */
+private val GENERATORS = listOf(
+    "ByteBuddy" to "\$ByteBuddy\$",
+    "Hibernate" to "\$HibernateProxy\$",
+    "Spring CGLIB" to "\$\$SpringCGLIB\$\$",
+    "Spring CGLIB" to "\$\$EnhancerBySpringCGLIB\$\$",
+    "Spring CGLIB" to "\$\$FastClassBySpringCGLIB\$\$",
+    "CGLIB" to "\$\$EnhancerByCGLIB\$\$",
+    "CGLIB" to "\$\$FastClassByCGLIB\$\$",
+    "Mockito" to "\$MockitoMock\$",
+    "Javassist" to "_\$\$_jvst",
+)
+
+private val JDK_PROXY_NAME = Regex("""(^|\.)\${'$'}Proxy\d+$""")
+
+/**
+ * Runtime-generated proxy/subclass, by naming convention. Lambdas and LambdaForms are not included:
+ * one per call site is normal and bounded.
+ */
+internal fun generatedOf(className: String): Generated? {
+    for ((generator, marker) in GENERATORS) {
+        val at = className.indexOf(marker)
+        if (at > 0) return Generated(generator, className.substring(0, at).removePrefix("net.bytebuddy.renamed."))
+    }
+    // hprof has no interface list, so all JDK proxies share one group
+    return if (JDK_PROXY_NAME.containsMatchIn(className)) Generated(JDK_PROXY, "(interfaces)") else null
+}
+
+// ponytail: fixed thresholds. A class per base (or per interface set for JDK proxies, common in Spring) is normal;
+// many for the same base, or spread over many loaders, means the class is regenerated instead of cached.
+// Make them CLI flags if real dumps show false positives.
+private const val PROXY_SUSPECT = 10
+private const val PROXY_SUSPECT_JDK = 200
+
+internal fun isProxySuspect(generator: String, classes: Int, loaders: Int) =
+    loaders >= PROXY_SUSPECT || classes >= (if (generator == JDK_PROXY) PROXY_SUSPECT_JDK else PROXY_SUSPECT)
+
+/** Package of the main class in `sun.java.command` (up to 3 segments), unless it is a jar or a library launcher. */
+internal fun detectAppPrefixes(command: String?): List<String> {
+    val first = command?.trim()?.substringBefore(' ') ?: return emptyList()
+    if (first.endsWith(".jar")) return emptyList()
+    val main = first.substringAfterLast('/') // -m module/main.Class
+    if ('.' !in main || isLibraryClass(main)) return emptyList()
+    return listOf(main.substringBeforeLast('.').split('.').take(3).joinToString("."))
+}
+
 private fun HeapObject.detail(): String? = when {
     this is HeapInstance && instanceClassName == "java.lang.String" -> readAsJavaString()?.take(MAX_STRING_SHOWN)
     this is HeapInstance && instanceOf("java.lang.Thread") -> threadField("name")?.readAsJavaString()
@@ -208,6 +395,23 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
     file.openHeapGraph(indexedGcRootTypes = rootTags).use { graph ->
         val n = graph.objectCount
         opt.log(opt.msg["log.scanning", n])
+
+        // Sections outside the core pass are independent: a failure (e.g. an inconsistent dump) becomes a
+        // report warning and an empty section instead of losing the whole analysis.
+        val warnings = ArrayList<String>()
+        fun <T> guard(section: String, fallback: T, block: () -> T): T = try { block() } catch (e: Exception) {
+            val w = opt.msg["warn.section", opt.msg[section], e.toString()]
+            opt.log(w); warnings.add(w); fallback
+        }
+
+        // ---- JVM environment ----
+        val jvm = guard("section.jvm", emptyMap()) { readSystemProps(graph) }
+        val vmArgs = guard("section.jvm", emptyList()) { readVmArgs(graph) }
+        val frameworks = guard("section.jvm", emptyList()) {
+            FRAMEWORKS.filter { graph.findClassByName(it.second) != null }.map { it.first }
+        }
+        val appPrefixes = opt.appPackages.toList().ifEmpty { detectAppPrefixes(jvm["sun.java.command"]) }
+        fun isApp(name: String) = isAppClass(name, appPrefixes)
 
         // ---- single pass: histogram, references, strings, class loaders ----
         val classAccs = ArrayList<Acc>()
@@ -318,31 +522,29 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         }
 
         val top = opt.top
-        val classes = classAccs.sortedByDescending { if (opt.retained) it.retained else it.shallow }
+        val appAcc = BooleanArray(classAccs.size) { isApp(classAccs[it].name) }
+        fun classStats(accs: List<Acc>) = accs.sortedByDescending { if (opt.retained) it.retained else it.shallow }
             .take(top)
             .map { ClassStat(it.name, it.count, it.shallow, if (opt.retained) it.retained else null) }
-        val packages = classAccs.groupBy { packageOf(it.name, opt.msg) }
+        fun packageStats(accs: List<Acc>) = accs.groupBy { packageOf(it.name, opt.msg) }
             .map { (pkg, list) ->
                 PackageStat(pkg, list.sumOf { it.count }, list.sumOf { it.shallow },
                     if (opt.retained) list.sumOf { it.retained } else null)
             }
             .sortedByDescending { it.shallow }
+        val appAccs = classAccs.filterIndexed { i, _ -> appAcc[i] }
 
-        // From here on each section is independent: a failure (e.g. an inconsistent dump) becomes a
-        // report warning and an empty section instead of losing the whole analysis.
-        val warnings = ArrayList<String>()
-        fun <T> guard(section: String, fallback: T, block: () -> T): T = try { block() } catch (e: Exception) {
-            val w = opt.msg["warn.section", opt.msg[section], e.toString()]
-            opt.log(w); warnings.add(w); fallback
+        fun retainedTop(filter: (Int) -> Boolean) =
+            if (dom != null) topN(top, dom.order.asSequence().drop(1).filter(filter)) { retained!![it] } else emptyList()
+        fun objectStats(idxs: List<Int>) = idxs.map { idx ->
+            val o = graph.findObjectById(ids[idx])
+            ObjectStat(hex(o.objectId), o.label(), shallow[idx], retained!![idx], o.detail())
         }
-
-        val topRetained = if (dom != null) topN(top, dom.order.asSequence().drop(1)) { retained!![it] } else emptyList()
-        val retainedObjects = guard("section.objects", emptyList()) {
-            topRetained.map { idx ->
-                val o = graph.findObjectById(ids[idx])
-                ObjectStat(hex(o.objectId), o.label(), shallow[idx], retained!![idx], o.detail())
-            }
-        }
+        val topRetained = retainedTop { true }
+        // instances only: a class object is accounted to java.lang.Class, never an application class
+        val appTopRetained = retainedTop { appAcc[clsOf[it]] }
+        val retainedObjects = guard("section.objects", emptyList()) { objectStats(topRetained) }
+        val appRetainedObjects = guard("section.objects", emptyList()) { objectStats(appTopRetained) }
         val tree = guard("section.dominators", null) { dom?.let { buildTree(graph, ids, it, retained!!) } }
 
         // ---- leaks / paths to GC roots (Shark HeapAnalyzer) ----
@@ -351,6 +553,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             // class objects are GC roots themselves (trivial path), so skip them
             topRetained.asSequence().map { graph.findObjectById(ids[it]) }.filter { it !is HeapClass }
                 .take(SUSPECTS).forEach { suspects.add(it.objectId) }
+            appTopRetained.take(SUSPECTS / 2).forEach { suspects.add(ids[it]) }
             opt.log(opt.msg["log.paths", suspects.size])
             findPaths(file, graph, suspects, opt, warnings)
         }
@@ -370,8 +573,8 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             }.map { DupString(it.key.take(MAX_STRING_SHOWN), it.value.count, it.value.bytes, (it.value.count - 1) * it.value.bytes) }
         }
 
-        val arrays = guard("section.arrays", emptyList()) {
-            topN(top, (graph.objectArrays + graph.primitiveArrays).map { it.objectIndex }) { shallow[it] }.map { idx ->
+        fun arrayStats(idxs: Sequence<Int>) =
+            topN(top, idxs) { shallow[it] }.map { idx ->
                 val o = graph.findObjectById(ids[idx])
                 val length = when (o) {
                     is HeapObjectArray -> o.byteSize / graph.identifierByteSize
@@ -380,6 +583,12 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                 }
                 ArrayStat(hex(o.objectId), o.className(), length, shallow[idx], retained?.get(idx))
             }
+        val arrays = guard("section.arrays", emptyList()) {
+            arrayStats((graph.objectArrays + graph.primitiveArrays).map { it.objectIndex })
+        }
+        // primitive arrays are never application classes
+        val appArrays = guard("section.arrays", emptyList()) {
+            arrayStats(graph.objectArrays.map { it.objectIndex }.filter { appAcc[clsOf[it]] })
         }
 
         val classLoaders = guard("section.loaders", emptyList()) {
@@ -410,8 +619,46 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             analysisMillis = System.currentTimeMillis() - start,
             toolVersion = VERSION,
         )
-        return HeapReport(summary, classes, packages, retainedObjects, tree, leaks, gcRoots, threads,
-            duplicateStrings, arrays, classLoaders, warnings)
+        // ---- runtime-generated classes (metaspace growth from uncached proxies) ----
+        class ProxyAcc(val example: String) { var classes = 0; var instances = 0L; val loaders = HashSet<Long>() }
+        val proxyAccs = guard("section.proxies", null) {
+            val accs = LinkedHashMap<Pair<String, String>, ProxyAcc>()
+            val counted = HashSet<String>() // Acc merges same-named classes, so count its instances once
+            for (c in graph.classes) {
+                val g = generatedOf(c.name) ?: continue
+                val acc = accs.getOrPut(g.generator to g.base) { ProxyAcc(c.name) }
+                acc.classes++
+                acc.loaders.add(c.readRecord().classLoaderId)
+                if (counted.add(c.name)) acc.instances += accByName[c.name]?.let { classAccs[it].count } ?: 0
+            }
+            accs
+        }
+        fun proxyReport(include: (String) -> Boolean) = proxyAccs?.let { accs ->
+            val groups = accs.filterKeys { include(it.second) }.map { (key, a) ->
+                ProxyGroup(key.first, key.second, a.classes, a.loaders.size, a.instances, a.example,
+                    isProxySuspect(key.first, a.classes, a.loaders.size))
+            }
+            ProxyReport(
+                generatedClasses = groups.sumOf { it.classes },
+                byGenerator = groups.groupBy { it.generator }.map { (g, l) -> NamedCount(g, l.sumOf { it.classes }) }
+                    .sortedByDescending { it.count },
+                groups = groups.sortedWith(compareByDescending<ProxyGroup> { it.suspect }.thenByDescending { it.classes }).take(top),
+            )
+        }
+
+        val app = AppView(
+            scope = appPrefixes.joinToString().ifEmpty { opt.msg["misc.appExclusion"] },
+            classes = classStats(appAccs),
+            packages = packageStats(appAccs),
+            retainedObjects = appRetainedObjects,
+            largestArrays = appArrays,
+            leaks = leaks.filter { l -> l.nodes.any { isApp(it.className) } },
+            threads = threads.filter { t -> t.frames.any { isApp(it.text.substringBefore('(').substringBeforeLast('.')) } },
+            proxies = proxyReport(::isApp),
+        )
+        return HeapReport(summary, classStats(classAccs), packageStats(classAccs), retainedObjects, tree, leaks, gcRoots,
+            threads, duplicateStrings, arrays, classLoaders, warnings, jvm, vmArgs, frameworks,
+            proxies = proxyReport { true }, app = app)
     }
 }
 

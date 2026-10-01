@@ -62,6 +62,8 @@ footer.note { margin-top: 48px; }
 .warn { border-left: 4px solid var(--critical); }
 .warn ul { margin: 0; padding-left: 20px; }
 .warn li { overflow-wrap: anywhere; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--axis); color: var(--text); }
+.scope { border-left: 4px solid var(--series-1); padding: 8px 12px; background: var(--surface); border-radius: 6px; overflow-wrap: anywhere; }
 @media (max-width: 900px) {
   nav { position: static; width: auto; border-right: 0; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; }
   nav .brand { width: 100%; }
@@ -178,6 +180,8 @@ const DATA = /*DATA*/;
   document.title = t('report.title', s.file);
   main.append(el('h1', { text: t('report.title', s.file) }));
   main.append(el('p', { class: 'sub', text: t('report.subtitle', s.hprofVersion, s.identifierByteSize, s.timestamp, num(s.analysisMillis)) }));
+  const full = !DATA.appScope; // the application view drops sections that cannot be split by class
+  if (!full) main.append(el('p', { class: 'scope', text: t('report.appScope', DATA.appScope) }));
   if (DATA.warnings?.length) {
     section('warnings', '⚠ ' + t('section.warnings'), t('note.warnings')).append(
       el('div', { class: 'card warn' }, el('ul', null, ...DATA.warnings.map(w => el('li', { text: w })))));
@@ -190,6 +194,50 @@ const DATA = /*DATA*/;
     ['summary.reachable', num(s.reachableCount)], ['summary.reachableBytes', bytes(s.reachableBytes)],
   ];
   sum.append(el('div', { class: 'tiles' }, ...tiles.map(([k, v]) => el('div', { class: 'tile' }, el('div', { class: 'k', text: t(k) }), el('div', { class: 'v', text: v })))));
+
+  // ---- Ambiente JVM ----
+  const KEY_PROPS = ['java.version', 'java.vendor', 'java.vm.name', 'java.vm.version', 'java.runtime.version', 'os.name', 'os.version',
+    'os.arch', 'user.dir', 'user.timezone', 'file.encoding', 'java.home', 'sun.java.command'];
+  const jvm = DATA.jvm || {};
+  const jv = section('jvm', t('section.jvm'));
+  const fw = DATA.frameworks || [];
+  jv.append(el('div', { class: 'toolbar' }, el('b', { text: t('jvm.frameworks') + ':' }),
+    ...(fw.length ? fw.map(f => el('span', { class: 'tag', text: f })) : [t('jvm.none')])));
+  const propCols = [{ h: t('col.property'), v: r => r.k, mono: true }, { h: t('col.value'), v: r => r.v, mono: true }];
+  jv.append(table(propCols, KEY_PROPS.filter(k => k in jvm).map(k => ({ k, v: jvm[k] }))));
+  jv.append(el('h3', { text: t('jvm.vmArgs') }), DATA.vmArgs?.length
+    ? el('pre', { class: 'mono', text: DATA.vmArgs.join('\n') }) : el('p', { class: 'note', text: t('note.vmArgs') }));
+  const allProps = Object.entries(jvm).map(([k, v]) => ({ k, v }));
+  if (allProps.length) jv.append(el('details', null, el('summary', { text: t('jvm.allProps', allProps.length) }), table(propCols, allProps)));
+
+  // ---- Classes geradas / proxies ----
+  if (DATA.proxies) {
+    const p = DATA.proxies;
+    const px = section('proxies', t('section.proxies'), t('note.proxies'));
+    const suspects = (p.groups || []).filter(g => g.suspect);
+    const pct = s.classCount ? (100 * (p.generatedClasses || 0) / s.classCount) : 0;
+    px.append(el('div', { class: 'tiles' }, ...[
+      [t('col.classes'), num(p.generatedClasses || 0)],
+      ['% ' + t('summary.classes'), pct.toLocaleString(LOCALE, { maximumFractionDigits: 1 }) + '%'],
+      [t('col.suspect'), num(suspects.length)],
+    ].map(([k, v]) => el('div', { class: 'tile' }, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v })))));
+    if (suspects.length) {
+      px.append(el('div', { class: 'card warn' }, el('b', { text: '⚠ ' + t('proxies.suspects', suspects.length) }),
+        el('ul', null, ...suspects.map(g => el('li', { class: 'mono', text: `${g.generator} · ${g.baseClass}: ${num(g.classes)} classes, ${num(g.loaders)} loaders` }))),
+        el('p', { class: 'note', text: t('note.proxiesTip') })));
+    }
+    const byGen = p.byGenerator || [];
+    if (byGen.length) chart(px, () => hbar(byGen.map(g => ({ name: g.name, value: g.count })), num), barHeight(byGen.length));
+    px.append(table([
+      { h: t('col.generator'), v: r => r.generator },
+      { h: t('col.baseClass'), v: r => r.baseClass, mono: true },
+      { h: t('col.classes'), v: r => r.classes, f: num, num: true },
+      { h: t('col.loaders'), v: r => r.loaders, f: num, num: true },
+      { h: t('col.instances'), v: r => r.instances, f: num, num: true },
+      { h: t('col.example'), v: r => r.example, mono: true },
+      { h: t('col.suspect'), v: r => r.suspect ? '⚠ ' + t('misc.yes') : t('misc.no') },
+    ], p.groups || []));
+  }
 
   // ---- Histograma ----
   const hist = section('classes', t('section.classes'));
@@ -295,9 +343,11 @@ const DATA = /*DATA*/;
   } else lk.append(el('p', { class: 'muted', text: t('misc.noData') }));
 
   // ---- GC roots ----
-  const gr = section('gcroots', t('section.gcRoots'));
-  chart(gr, () => hbar(DATA.gcRoots.map(g => ({ name: g.name, value: g.count })), num), barHeight(DATA.gcRoots.length));
-  gr.append(table([{ h: t('col.type'), v: r => r.name }, { h: t('col.count'), v: r => r.count, f: num, num: true }], DATA.gcRoots));
+  if (full) {
+    const gr = section('gcroots', t('section.gcRoots'));
+    chart(gr, () => hbar(DATA.gcRoots.map(g => ({ name: g.name, value: g.count })), num), barHeight(DATA.gcRoots.length));
+    gr.append(table([{ h: t('col.type'), v: r => r.name }, { h: t('col.count'), v: r => r.count, f: num, num: true }], DATA.gcRoots));
+  }
 
   // ---- Threads ----
   const th = section('threads', t('section.threads'));
@@ -317,7 +367,7 @@ const DATA = /*DATA*/;
   if (stacks.childElementCount) th.append(el('h3', { text: t('section.stacks') }), stacks);
 
   // ---- Strings / arrays / loaders ----
-  section('strings', t('section.strings')).append(table([
+  if (full) section('strings', t('section.strings')).append(table([
     { h: t('col.value'), v: r => r.value, f: v => JSON.stringify(v), mono: true },
     { h: t('col.copies'), v: r => r.count, f: num, num: true },
     { h: t('col.bytesEach'), v: r => r.bytesEach, f: bytes, num: true },
@@ -330,7 +380,7 @@ const DATA = /*DATA*/;
     { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
     { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
   ], DATA.largestArrays));
-  section('loaders', t('section.loaders')).append(table([
+  if (full) section('loaders', t('section.loaders')).append(table([
     { h: t('col.id'), v: r => r.id, mono: true },
     { h: t('col.class'), v: r => r.className, mono: true },
     { h: t('col.classesLoaded'), v: r => r.classesLoaded, f: num, num: true },

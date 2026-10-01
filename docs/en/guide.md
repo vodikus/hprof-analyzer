@@ -68,6 +68,7 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [options]
 | `--top <n>` | `50` | Rows in each table (classes, objects, strings, arrays). |
 | `--no-retained` | off | Skip the dominator tree. About 2× faster and uses less memory, but retained sizes, the treemap and the "biggest objects" section are empty, and GC root paths are only computed for `--leak-class`. |
 | `--leak-class a.B,c.D` | — | Fully qualified class names. Up to 20 instances of these classes get a GC root path, in addition to the 10 biggest objects. |
+| `--app-package a.b,c.d` | auto | Application packages for the extra `<dump>-app.html`/`.md` report (application classes only). Without it, the main class package (`sun.java.command`) is used or, for a jar/launcher, everything outside the JDK, language and known frameworks/libraries. |
 | `--i18n <code>` | `pt-BR` | Language of the reports and console messages. See [section 8](#8-languages-i18n). |
 | `-h`, `--help` | — | Print the version and usage (in the language given by `--i18n`). |
 | `-V`, `--version` | — | Print the version (`hprof-analyzer 1.0.0`) and exit. |
@@ -99,6 +100,10 @@ show exact values on hover.
 hprof version, identifier size (4 or 8 bytes), dump timestamp (UTC), counts of objects, classes, instances, object
 arrays and primitive arrays, number of GC roots, total shallow size, and how many objects and bytes are reachable
 through strong references.
+
+### Generated classes / proxies (metaspace)
+
+Classes created at runtime (ByteBuddy, Hibernate, CGLIB/Spring, Mockito, Javassist, JDK Proxy), grouped by generator and base class, with the number of ClassLoaders that defined them. A group is flagged as suspicious with 10+ classes for the same base, 10+ ClassLoaders, or 200+ JDK proxies: a sign of a proxy regenerated on every use instead of cached, a common cause of `OutOfMemoryError: Metaspace`. Typical fix: generate the class once and reuse it (ByteBuddy `TypeCache`, `Enhancer`/`ProxyFactory` with caching) and do not create a ClassLoader per call. The hprof has no metaspace size, only the classes.
 
 ### Class histogram
 One row per class (arrays included): number of instances, total shallow size and retained size. The chart shows the

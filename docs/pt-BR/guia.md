@@ -68,6 +68,7 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [opções]
 | `--top <n>` | `50` | Linhas em cada tabela (classes, objetos, strings, arrays). |
 | `--no-retained` | desligado | Pula a dominator tree. Cerca de 2× mais rápido e usa menos memória, mas ficam vazios os retained sizes, o treemap e a seção de maiores objetos, e os caminhos até GC root só são calculados para `--leak-class`. |
 | `--leak-class a.B,c.D` | — | Nomes completos de classes. Até 20 instâncias dessas classes ganham caminho até GC root, além dos 10 maiores objetos. |
+| `--app-package a.b,c.d` | automático | Pacotes da aplicação para o relatório extra `<dump>-app.html`/`.md` (só classes da aplicação). Sem a opção, usa o pacote da main class (`sun.java.command`) ou, se for um jar/launcher, tudo fora de JDK, linguagem e frameworks/bibliotecas conhecidos. |
 | `--i18n <código>` | `pt-BR` | Idioma dos relatórios e das mensagens do console. Veja a [seção 8](#8-idiomas-i18n). |
 | `-h`, `--help` | — | Mostra a versão e o uso (no idioma de `--i18n`). |
 | `-V`, `--version` | — | Mostra a versão (`hprof-analyzer 1.0.0`) e sai. |
@@ -99,6 +100,10 @@ coluna. Os gráficos mostram o valor exato ao passar o mouse.
 Versão do hprof, tamanho de identificador (4 ou 8 bytes), data/hora do dump (UTC), contagem de objetos, classes,
 instâncias, object arrays e primitive arrays, número de GC roots, shallow total e quantos objetos e bytes são
 alcançáveis por referências fortes.
+
+### Classes geradas / proxies (metaspace)
+
+Classes criadas em runtime (ByteBuddy, Hibernate, CGLIB/Spring, Mockito, Javassist, JDK Proxy), agrupadas por gerador e classe base, com o número de ClassLoaders que as definiram. Um grupo é marcado como suspeito com 10+ classes para a mesma base, 10+ ClassLoaders, ou 200+ JDK proxies: sinal de proxy recriado a cada uso em vez de cacheado, causa comum de `OutOfMemoryError: Metaspace`. Correção típica: gerar a classe uma vez e reutilizar (`TypeCache` do ByteBuddy, `Enhancer`/`ProxyFactory` com cache) e não criar um ClassLoader por chamada. O hprof não traz o tamanho do metaspace, só as classes.
 
 ### Histograma de classes
 Uma linha por classe (arrays incluídos): número de instâncias, shallow total e retained size. O gráfico mostra as 20

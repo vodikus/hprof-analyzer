@@ -3,3 +3,5 @@ build/
 out/
 *.hprof
 bin/
+report/
+.kotlin/errors/

@@ -13,6 +13,9 @@ class LeakMarker(val payload: ByteArray)
 object Holder {
     @JvmStatic
     var marker: LeakMarker? = null
+
+    /** JDK proxies, one throwaway ClassLoader each: the "uncached proxy" anti-pattern. */
+    var proxies: List<Runnable> = emptyList()
 }
 
 class AnalyzerTest {
@@ -37,8 +40,61 @@ class AnalyzerTest {
     }
 
     @Test
+    fun appClassDetection() {
+        val auto = emptyList<String>()
+        assertTrue(isAppClass("com.empresa.xpto.Foo", auto))
+        assertTrue(isAppClass("com.empresa.xpto.Foo[]", auto))
+        assertTrue(!isAppClass("java.lang.String", auto))
+        assertTrue(!isAppClass("org.springframework.beans.Foo", auto))
+        assertTrue(!isAppClass("int[]", auto))
+        assertTrue(!isAppClass("com.empresa.xpto.Foo\$\$Lambda/0x123", auto))
+        assertTrue(!isAppClass("com.empresa.xpto.Foo\$\$SpringCGLIB\$\$0", auto))
+        val xpto = listOf("com.empresa.xpto")
+        assertTrue(isAppClass("com.empresa.xpto.api.Foo", xpto))
+        assertTrue(!isAppClass("com.empresa.xptoOther.Foo", xpto))
+        assertTrue(!isAppClass("com.outra.Foo", xpto))
+
+        assertEquals(listOf("com.empresa.xpto"), detectAppPrefixes("com.empresa.xpto.api.Main --port 8080"))
+        assertEquals(listOf("com.empresa.xpto"), detectAppPrefixes("app/com.empresa.xpto.Main"))
+        assertEquals(emptyList(), detectAppPrefixes("/opt/app.jar --spring.profiles.active=prod"))
+        assertEquals(emptyList(), detectAppPrefixes("org.springframework.boot.loader.launch.JarLauncher"))
+        assertEquals(emptyList(), detectAppPrefixes(null))
+    }
+
+    @Test
+    fun generatedClassDetection() {
+        fun g(name: String) = generatedOf(name)?.let { it.generator to it.base }
+        assertEquals("ByteBuddy" to "com.x.Foo", g("com.x.Foo\$ByteBuddy\$aB12cD"))
+        assertEquals("ByteBuddy" to "java.lang.Object", g("net.bytebuddy.renamed.java.lang.Object\$ByteBuddy\$x1"))
+        assertEquals("Hibernate" to "com.x.Order", g("com.x.Order\$HibernateProxy\$Zx9"))
+        assertEquals("Spring CGLIB" to "com.x.Svc", g("com.x.Svc\$\$SpringCGLIB\$\$0"))
+        assertEquals("Spring CGLIB" to "com.x.Svc", g("com.x.Svc\$\$EnhancerBySpringCGLIB\$\$1a2b"))
+        assertEquals("CGLIB" to "com.x.Svc", g("com.x.Svc\$\$EnhancerByCGLIB\$\$1a2b"))
+        assertEquals("Mockito" to "com.x.Repo", g("com.x.Repo\$MockitoMock\$123"))
+        assertEquals("Javassist" to "com.x.Foo", g("com.x.Foo_\$\$_jvst1a_0"))
+        assertEquals(JDK_PROXY to "(interfaces)", g("jdk.proxy3.\$Proxy12"))
+        assertEquals(JDK_PROXY to "(interfaces)", g("com.sun.proxy.\$Proxy3"))
+        assertEquals(null, g("com.x.Foo\$\$Lambda/0x0000123"))
+        assertEquals(null, g("com.x.Foo\$Inner"))
+        assertEquals(null, g("com.x.ProxyFactory"))
+
+        assertTrue(!isAppClass("com.x.Foo\$ByteBuddy\$abc", emptyList()))
+        assertTrue(!isAppClass("com.x.Order\$HibernateProxy\$abc", listOf("com.x")))
+
+        assertTrue(!isProxySuspect("ByteBuddy", classes = 9, loaders = 1))
+        assertTrue(isProxySuspect("ByteBuddy", classes = 10, loaders = 1))
+        assertTrue(!isProxySuspect(JDK_PROXY, classes = 150, loaders = 3))
+        assertTrue(isProxySuspect(JDK_PROXY, classes = 200, loaders = 3))
+        assertTrue(isProxySuspect(JDK_PROXY, classes = 12, loaders = 12))
+    }
+
+    @Test
     fun analyzesOwnHeapDump() {
         Holder.marker = LeakMarker(ByteArray(10 * 1024 * 1024))
+        Holder.proxies = List(25) {
+            val loader = object : ClassLoader(AnalyzerTest::class.java.classLoader) {}
+            java.lang.reflect.Proxy.newProxyInstance(loader, arrayOf(Runnable::class.java)) { _, _, _ -> null } as Runnable
+        }
         val dump = File.createTempFile("self", ".hprof").also { it.delete() }
         try {
             ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean::class.java).dumpHeap(dump.path, true)
@@ -56,6 +112,32 @@ class AnalyzerTest {
             assertTrue(report.threads.any { it.name == "main" || it.frames.isNotEmpty() })
             assertTrue(report.gcRoots.isNotEmpty())
             assertTrue(report.warnings.isEmpty(), "healthy dump: ${report.warnings}")
+
+            // JVM environment read from the heap
+            assertEquals(System.getProperty("java.version"), report.jvm["java.version"])
+            assertTrue("Kotlin" in report.frameworks, "frameworks: ${report.frameworks}")
+            // application view: Gradle worker main class is a library, so exclusion mode keeps our classes only
+            val app = report.app!!
+            assertTrue(app.classes.any { it.name == LeakMarker::class.java.name }, "app classes: ${app.classes.map { it.name }}")
+            assertTrue(app.classes.none { it.name.startsWith("java.") || it.name.startsWith("kotlin.") || '.' !in it.name })
+            assertTrue(app.retainedObjects.any { it.className == LeakMarker::class.java.name })
+            val appReport = report.appOnly()
+            val appMd = toMarkdown(appReport)
+            File("build/test-report-app.md").writeText(appMd); File("build/test-report-app.html").writeText(toHtml(appReport))
+            assertContains(appMd, "Visão da aplicação")
+            assertContains(appMd, LeakMarker::class.java.name)
+            assertTrue("## GC roots" !in appMd && "## Strings duplicadas" !in appMd)
+            assertContains(toMarkdown(report), "## Ambiente JVM")
+            assertContains(toHtml(appReport), "\"appScope\":")
+
+            // generated classes: 25 JDK proxies in 25 loaders are flagged by the loader rule
+            val jdkProxies = report.proxies!!.groups.first { it.generator == JDK_PROXY }
+            assertTrue(jdkProxies.classes >= 25 && jdkProxies.loaders >= 25, "jdk proxies: $jdkProxies")
+            assertTrue(jdkProxies.suspect)
+            val fullMd = toMarkdown(report)
+            assertContains(fullMd, "## Classes geradas / proxies (metaspace)")
+            assertContains(fullMd, "grupo(s) suspeito(s)")
+            assertContains(toHtml(report), "\"proxies\":{")
 
             // a failed section is flagged at the top of both reports
             val warned = report.copy(warnings = listOf("Aviso: \"Caminhos até GC roots\" falhou, seção omitida: boom"))
@@ -86,6 +168,7 @@ class AnalyzerTest {
         } finally {
             dump.delete()
             Holder.marker = null
+            Holder.proxies = emptyList()
         }
     }
 }
