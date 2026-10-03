@@ -15,6 +15,7 @@ import shark.HprofRecord.HeapDumpRecord.ObjectRecord.PrimitiveArrayDumpRecord.In
 import shark.HprofRecord.HeapDumpRecord.ObjectRecord.PrimitiveArrayDumpRecord.LongArrayDump
 import shark.HprofRecord.HeapDumpRecord.ObjectRecord.PrimitiveArrayDumpRecord.ShortArrayDump
 import shark.ValueHolder
+import java.util.PriorityQueue
 
 @Serializable
 data class WasteReport(
@@ -86,6 +87,7 @@ private const val NULL_FIELD = 0.9
 private const val SPARSE_MIN_LENGTH = 8
 private const val PREFIX_LEN = 12
 private const val NULL_FIELD_CLASSES = 15
+private const val BIG_COLLECTIONS = 500
 
 /** Size / backing array field per collection class; null size = derived (ArrayDeque head/tail). */
 private class CollType(val sizeField: String?, val arrayField: String)
@@ -164,12 +166,18 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
 
     fun instance(obj: HeapInstance, name: String, fields: List<HeapField>, size: Long) = safe {
         overhead(size, OBJ_HEADER)
-        COLLECTIONS[name]?.let { collection(name, it, fields) }
+        COLLECTIONS[name]?.let { collection(obj.objectIndex, name, it, fields) }
         if (name in BOXES) box(name, fields, size)
         nullFields(obj.instanceClassId, name, fields)
     }
 
-    private fun collection(name: String, type: CollType, fields: List<HeapField>) {
+    /** Biggest collections (size, object index), kept for matching collections across dumps by path. */
+    private val big = PriorityQueue<LongArray>(compareBy { it[0] })
+
+    /** Object index and size of the biggest collections, largest first. */
+    fun bigCollections(): List<Pair<Int, Long>> = big.sortedByDescending { it[0] }.map { it[1].toInt() to it[0] }
+
+    private fun collection(idx: Int, name: String, type: CollType, fields: List<HeapField>) {
         val array = fields.named(type.arrayField)?.asObject?.asObjectArray
         val capacity = array?.let { (it.byteSize / idSize).toLong() } ?: 0L
         val size = if (type.sizeField != null) fields.named(type.sizeField)?.let { it.asInt?.toLong() ?: it.asLong } ?: 0L
@@ -177,6 +185,10 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
         else Math.floorMod((fields.named("tail")?.asInt ?: 0) - (fields.named("head")?.asInt ?: 0), capacity.toInt()).toLong()
         val acc = collections.getOrPut(name) { CollAcc() }
         acc.count++; acc.size += size; acc.capacity += capacity
+        if (size > 0) {
+            big.add(longArrayOf(size, idx.toLong()))
+            if (big.size > BIG_COLLECTIONS) big.poll()
+        }
         if (size == 0L && capacity > 0) { acc.empty++; acc.emptyBytes += array!!.byteSize }
         sizes[log2Bucket(size)]++
         if (capacity > 0) fill[if (size <= 0) 0 else Math.ceil(4.0 * size / capacity).toInt().coerceIn(1, 4)]++

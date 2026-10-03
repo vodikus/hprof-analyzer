@@ -69,6 +69,7 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [opções]
 | `--no-retained` | desligado | Pula a dominator tree. Cerca de 2× mais rápido e usa menos memória, mas ficam vazios os retained sizes, o treemap e a seção de maiores objetos, e os caminhos até GC root só são calculados para `--leak-class`. |
 | `--leak-class a.B,c.D` | — | Nomes completos de classes. Até 20 instâncias dessas classes ganham caminho até GC root, além dos 10 maiores objetos. |
 | `--app-package a.b,c.d` | automático | Pacotes da aplicação para o relatório extra `<dump>-app.html`/`.md` (só classes da aplicação). Sem a opção, usa o pacote da main class (`sun.java.command`) ou, se for um jar/launcher, tudo fora de JDK, linguagem e frameworks/bibliotecas conhecidos. |
+| `--baseline a.json,b.json` | — | Snapshots de dumps anteriores (gerados com `--format json`). O relatório ganha a seção de comparação entre dumps. |
 | `--i18n <código>` | `pt-BR` | Idioma dos relatórios e das mensagens do console. Veja a [seção 8](#8-idiomas-i18n). |
 | `-h`, `--help` | — | Mostra a versão e o uso (no idioma de `--i18n`). |
 | `-V`, `--version` | — | Mostra a versão (`hprof-analyzer 1.0.0`) e sai. |
@@ -159,6 +160,23 @@ Maiores object arrays e primitive arrays, com tamanho (elementos), bytes e retai
 ### ClassLoaders
 Cada instância de class loader com o número de classes que ela definiu e o retained size. `<bootstrap>` representa o
 loader nativo da JVM.
+
+### Comparação entre dumps
+Só com `--baseline`. Gere um snapshot de cada dump com `--format json` e passe os anteriores ao analisar o mais
+recente:
+
+```bash
+java -jar hprof-analyzer-all.jar dia1.hprof --format json
+java -jar hprof-analyzer-all.jar dia2.hprof --format json
+java -jar hprof-analyzer-all.jar dia3.hprof --baseline dia1.snapshot.json,dia2.snapshot.json
+```
+
+Os snapshots são ordenados pelo timestamp do dump. A seção mostra a variação (Δ = atual − primeiro) de bytes por
+classe e por pacote e de elementos das maiores coleções, numa barra divergente (cresceu × diminuiu) e na evolução de
+um item escolhido. "Cresce" marca o que está presente em todos os dumps e aumenta a cada um. Como os IDs dos objetos
+mudam entre dumps, as coleções são casadas pela assinatura do caminho a partir do GC root (ex.:
+`[StickyClass] class X → X.cache (java.util.HashMap)`). O painel de saúde alerta quando coleções crescem em todos os
+dumps (a partir de 3) e quando o heap cresce mais de 20%.
 
 ### Painel de saúde
 Primeira seção do relatório completo. Regras automáticas com severidade (crítico, alerta, info) e link para a seção:
@@ -320,7 +338,8 @@ Grupos de chaves: `cli.*` (uso e erros), `log.*` (progresso), `report.*`, `secti
 | `src/main/kotlin/Graph.kt` | Fan-in/fan-out, profundidade e arestas entre classes. |
 | `src/main/kotlin/Frameworks.kt` | Inspetores de sessões, Hibernate, Spring, JDBC, caches, Jackson e exceções. |
 | `src/main/kotlin/Health.kt` | Regras do painel de saúde (função pura sobre o `HeapReport`). |
-| `src/main/kotlin/Snapshot.kt` | Snapshot JSON com o histograma completo (`--format json`). |
+| `src/main/kotlin/Snapshot.kt` | Snapshot JSON com o histograma completo e as coleções por caminho (`--format json`). |
+| `src/main/kotlin/Diff.kt` | Comparação com snapshots anteriores (`--baseline`). |
 | `src/main/kotlin/Reports.kt` | Geração do Markdown e do HTML. |
 | `src/main/kotlin/I18n.kt` | Carrega os arquivos de idioma e formata as mensagens. |
 | `src/main/resources/report.html` | Template HTML: CSS e o JavaScript que desenha tabelas e gráficos. |

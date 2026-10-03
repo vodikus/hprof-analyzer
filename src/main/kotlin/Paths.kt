@@ -1,6 +1,7 @@
 package hprof
 
 import kotlinx.serialization.Serializable
+import shark.HeapObject
 
 /**
  * Shortest paths from the GC roots to every instance of a class, merged by class (like MAT's "merge shortest paths").
@@ -80,3 +81,44 @@ internal fun mergedPaths(h: Heap, parent: IntArray, rootTypes: Map<Int, String>,
         links = kept.map { PathLink(it.key.first, it.key.second, it.value) },
     )
 }
+
+/** Collections grouped by the path that reaches them: stable across dumps, unlike object ids. */
+@Serializable
+data class CollectionAtPath(val signature: String, val count: Int, val size: Long)
+
+private const val MAX_SIGNATURE_HOPS = 12
+
+/**
+ * "[Root] Owner.field → Owner.field → … (Collection)" for the BFS path from a GC root to [v]. Array slots are written
+ * as "Type[]" (indexes are not stable). Paths longer than [MAX_SIGNATURE_HOPS] keep their last hops after "…".
+ */
+internal fun pathSignature(h: Heap, parent: IntArray, rootTypes: Map<Int, String>, v: Int): String? {
+    val parts = ArrayList<String>()
+    var cur = v
+    while (parts.size < MAX_SIGNATURE_HOPS) {
+        val p = parent[cur]
+        if (p < 0) return null // unreachable
+        if (p == h.n) { parts.add("[${rootTypes[cur] ?: "GC root"}] ${h.label(cur)}"); break }
+        parts.add(edgeName(h, p, h.ids[cur]))
+        cur = p
+    }
+    if (parts.size == MAX_SIGNATURE_HOPS && parent[cur] != h.n) parts.add("…")
+    return parts.reversed().joinToString(" → ") + " (${h.label(v)})"
+}
+
+/** How object [p] references the object with id [childId]: "Class.field", "Class.static field" or "Type[]". */
+private fun edgeName(h: Heap, p: Int, childId: Long): String = when (val o = h.graph.findObjectById(h.ids[p])) {
+    is HeapObject.HeapInstance -> o.readFields().firstOrNull { it.value.asObjectId == childId }
+        ?.let { "${o.instanceClassSimpleName}.${it.name}" } ?: o.instanceClassSimpleName
+    is HeapObject.HeapClass -> o.readStaticFields().firstOrNull { it.value.asObjectId == childId }
+        ?.let { "${o.simpleName}.${it.name}" } ?: o.simpleName
+    is HeapObject.HeapObjectArray -> o.arrayClassName.substringAfterLast('.')
+    is HeapObject.HeapPrimitiveArray -> o.arrayClassName
+}
+
+/** The [big] collections (index, size) grouped by path signature. */
+internal fun collectionsByPath(h: Heap, parent: IntArray, rootTypes: Map<Int, String>, big: List<Pair<Int, Long>>): List<CollectionAtPath> =
+    big.mapNotNull { (idx, size) -> pathSignature(h, parent, rootTypes, idx)?.let { it to size } }
+        .groupBy({ it.first }) { it.second }
+        .map { (sig, sizes) -> CollectionAtPath(sig, sizes.size, sizes.sum()) }
+        .sortedByDescending { it.size }

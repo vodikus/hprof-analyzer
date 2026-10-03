@@ -28,6 +28,7 @@ fun main(args: Array<String>) {
     var retained = true
     var leakClasses = emptySet<String>()
     var appPackages = emptySet<String>()
+    var baselines = emptyList<File>()
     val it = args.iterator()
     fun value(flag: String) = if (it.hasNext()) it.next() else fail(msg["cli.missingValue", flag])
     while (it.hasNext()) {
@@ -38,6 +39,7 @@ fun main(args: Array<String>) {
             "--no-retained" -> retained = false
             "--leak-class" -> leakClasses = value(a).split(',').map(String::trim).filter(String::isNotEmpty).toSet()
             "--app-package" -> appPackages = value(a).split(',').map { p -> p.trim().removeSuffix(".") }.filter(String::isNotEmpty).toSet()
+            "--baseline" -> baselines = value(a).split(',').map(String::trim).filter(String::isNotEmpty).map(::File)
             "--i18n" -> value(a) // already handled
             else -> if (a.startsWith("--") || input != null) fail(msg["cli.unknownArg", a]) else input = File(a)
         }
@@ -46,9 +48,16 @@ fun main(args: Array<String>) {
     if (!file.isFile) fail(msg["cli.fileNotFound", file])
     val unknown = formats - setOf("html", "md", "json")
     if (unknown.isNotEmpty()) fail(msg["cli.unknownFormat", unknown])
+    baselines.firstOrNull { !it.isFile }?.let { fail(msg["cli.fileNotFound", it]) }
+    val snapshots = baselines.map { f ->
+        try { readSnapshot(f) } catch (e: Exception) { fail(msg["cli.badSnapshot", f, e.message ?: e.toString()]) }
+    }
 
     System.err.println(NAME_VERSION)
-    val report = analyze(file, Options(top, retained, leakClasses, appPackages, msg))
+    val report = analyze(file, Options(top, retained, leakClasses, appPackages, msg)).let { r ->
+        if (snapshots.isEmpty()) r
+        else r.copy(diff = diff(toSnapshot(r), snapshots, top)).let { it.copy(health = health(it)) }
+    }
     out.mkdirs()
     fun write(r: HeapReport, base: String) {
         if ("md" in formats) File(out, "$base.md").also { f -> f.writeText(toMarkdown(r, msg)); println(f.path) }

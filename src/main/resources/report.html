@@ -10,21 +10,21 @@
   --page: #f9f9f7; --surface: #fcfcfb; --text: #0b0b0b; --text-2: #52514e; --muted: #898781;
   --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --series-1: #2a78d6; --seq-2: #86b6ef; --seq-3: #3987e5; --seq-4: #1c5cab;
-  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; --neutral: #898781;
+  --div-up: #d4553a; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; --neutral: #898781;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --page: #0d0d0d; --surface: #1a1a19; --text: #ffffff; --text-2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-    --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281;
+    --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281; --div-up: #e66767;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
   --page: #0d0d0d; --surface: #1a1a19; --text: #ffffff; --text-2: #c3c2b7; --muted: #898781;
   --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-  --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281;
+  --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281; --div-up: #e66767;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -260,6 +260,87 @@ const DATA = /*DATA*/;
     ['summary.unreachable', hasRetained ? bytes(s.totalShallow - s.reachableBytes) : '-'],
   ];
   sum.append(el('div', { class: 'tiles' }, ...tiles.map(([k, v]) => el('div', { class: 'tile' }, el('div', { class: 'k', text: t(k) }), el('div', { class: 'v', text: v })))));
+
+  // ---- Comparação entre dumps ----
+  const df = DATA.diff;
+  if (df) {
+    const ds = section('diff', t('section.diff'), t('note.diff'));
+    const heapOf = p => p.reachableBytes ?? p.totalShallow;
+    const first = df.dumps[0], last = df.dumps[df.dumps.length - 1];
+    const signed = (v, fmt) => (v > 0 ? '+' : v < 0 ? '−' : '') + fmt(Math.abs(v));
+    ds.append(el('div', { class: 'tiles' },
+      tile(t('diff.dumps'), num(df.dumps.length)),
+      tile(t('diff.heapDelta'), signed(heapOf(last) - heapOf(first), bytes)),
+      tile(t('col.growing'), num([...df.classes, ...df.collections].filter(d => d.growing).length))));
+    ds.append(table([
+      { h: t('summary.file'), v: r => r.file, mono: true },
+      { h: t('summary.timestamp'), v: r => r.timestamp },
+      { h: t('summary.totalShallow'), v: r => r.totalShallow, f: bytes, num: true },
+      { h: t('summary.reachableBytes'), v: r => r.reachableBytes, f: bytes, num: true },
+      { h: t('summary.objects'), v: r => r.objectCount, f: num, num: true },
+    ], df.dumps));
+    const dumpLabels = df.dumps.map((p, i) => i === df.dumps.length - 1 ? t('col.last') : p.timestamp.replace('T', ' ').slice(0, 16));
+
+    // Diverging bar: growth (warm) vs shrink (cool), signed labels as the second encoding
+    function divbar(list, fmt) {
+      const data = [...list].sort((a, b) => a.delta - b.delta);
+      return {
+        textStyle: baseText(),
+        grid: { left: 12, right: 48, top: 12, bottom: 24, containLabel: true },
+        tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
+          formatter: ps => { const d = data[ps[0].dataIndex];
+            return `${esc(d.name)}<br><b>${signed(d.delta, fmt)}</b><br>${d.values.map((v, i) => esc(dumpLabels[i]) + ': ' + (v == null ? '-' : fmt(v))).join('<br>')}`; } }),
+        xAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: v => signed(v, fmt) }, splitLine: { lineStyle: { color: css('--grid') } } },
+        yAxis: { type: 'category', data: data.map(d => short(d.name)), axisLabel: { color: css('--text-2') }, axisTick: { show: false },
+                 axisLine: { lineStyle: { color: css('--axis') } } },
+        series: [{ type: 'bar', barMaxWidth: 16,
+          data: data.map(d => ({ value: d.delta, itemStyle: { color: css(d.delta >= 0 ? '--div-up' : '--series-1'),
+            borderRadius: d.delta >= 0 ? [0, 4, 4, 0] : [4, 0, 0, 4] } })),
+          label: { show: true, position: 'outside', color: css('--text-2'), fontSize: 11, formatter: p => signed(p.value, fmt) } }],
+      };
+    }
+    // Trend of one item over the dumps (single series, so no legend)
+    function trend(d, fmt) {
+      return {
+        textStyle: baseText(),
+        grid: { left: 12, right: 32, top: 24, bottom: 24, containLabel: true },
+        tooltip: tooltip({ trigger: 'axis', formatter: ps => `${esc(dumpLabels[ps[0].dataIndex])}<br><b>${ps[0].value == null ? '-' : fmt(ps[0].value)}</b>` }),
+        xAxis: { type: 'category', data: dumpLabels, axisLabel: { color: css('--text-2') }, axisLine: { lineStyle: { color: css('--axis') } } },
+        yAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: fmt }, splitLine: { lineStyle: { color: css('--grid') } } },
+        series: [{ type: 'line', data: d.values, connectNulls: false, symbolSize: 8, lineStyle: { width: 2, color: css('--series-1') },
+          itemStyle: { color: css('--series-1'), borderColor: css('--surface'), borderWidth: 2 } }],
+      };
+    }
+    const growingOnly = el('input', { type: 'checkbox', id: 'diff-growing' });
+    ds.append(el('div', { class: 'toolbar' }, growingOnly, el('label', { for: 'diff-growing', text: t('diff.growingOnly') })));
+    const redraw = [];
+    [['diff.classes', 'col.class', df.classes, bytes], ['diff.packages', 'col.package', df.packages, bytes], ['diff.collections', 'col.path', df.collections, num]]
+      .forEach(([title, col, list, fmt]) => {
+        if (!list.length) return;
+        ds.append(el('h3', { text: t(title) }));
+        const pick = () => growingOnly.checked ? list.filter(d => d.growing) : list;
+        const top = () => [...pick()].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 20);
+        const bar = chart(ds, () => divbar(top(), fmt), barHeight(Math.min(20, list.length)));
+        const sel = el('select', { 'aria-label': t(col) });
+        const fillSel = () => sel.replaceChildren(...pick().map(d => el('option', { value: list.indexOf(d), text: d.name })));
+        fillSel();
+        ds.append(el('div', { class: 'toolbar' }, t('diff.trend'), sel));
+        const line = chart(ds, () => trend(list[+sel.value] || list[0], fmt), 240);
+        sel.onchange = () => draw(line);
+        const tableBox = el('div');
+        const fillTable = () => tableBox.replaceChildren(table([
+          { h: t(col), v: r => r.name, mono: true },
+          { h: t('col.first'), v: r => r.values[0], f: fmt, num: true },
+          { h: t('col.last'), v: r => r.values[r.values.length - 1], f: fmt, num: true },
+          { h: t('col.delta'), v: r => r.delta, f: v => signed(v, fmt), num: true },
+          { h: t('col.growing'), v: r => r.growing ? '↗ ' + t('misc.yes') : '' },
+        ], pick()));
+        fillTable();
+        ds.append(tableBox);
+        redraw.push(() => { draw(bar); fillSel(); draw(line); fillTable(); });
+      });
+    growingOnly.onchange = () => redraw.forEach(f => f());
+  }
 
   // ---- Ambiente JVM ----
   const KEY_PROPS = ['java.version', 'java.vendor', 'java.vm.name', 'java.vm.version', 'java.runtime.version', 'os.name', 'os.version',

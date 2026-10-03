@@ -18,6 +18,7 @@ private const val MIN_FILL_INSTANCES = 1000
 private const val FINALIZER_QUEUE = 10_000L
 private const val POOL_QUEUE = 10_000
 private const val OBJECT_MAPPERS = 10L
+private const val HEAP_GROWTH = 0.20
 private const val WEBAPP_LOADERS = 2
 private const val DUP_STRINGS = 0.10
 private const val EMPTY_COLLECTIONS = 0.05
@@ -37,6 +38,15 @@ internal fun health(r: HeapReport): List<HealthFinding> = buildList {
     }
     r.references?.finalizerQueue?.let { if (it > FINALIZER_QUEUE) add(CRITICAL, "finalizerQueue", "references", it) }
     r.concurrency?.pools?.filter { (it.queued ?: 0) > POOL_QUEUE }?.forEach { add(CRITICAL, "poolQueue", "concurrency", it.className, it.queued!!) }
+    r.diff?.let { d ->
+        // with only two dumps any growth looks monotonic: require 3+
+        val growing = d.collections.count { it.growing }
+        if (d.dumps.size >= 3 && growing > 0) add(WARNING, "growingCollections", "diff", growing, d.dumps.size)
+        fun heap(p: DumpPoint) = (p.reachableBytes ?: p.totalShallow).toDouble()
+        val first = heap(d.dumps.first())
+        val last = heap(d.dumps.last())
+        if (first > 0 && last > first * (1 + HEAP_GROWTH)) add(INFO, "heapGrowth", "diff", pct(last - first, first), d.dumps.size)
+    }
     fun fwMetric(section: String, key: String) = r.inspections.firstOrNull { it.key == section }?.metrics?.firstOrNull { it.key == key }?.value
     fwMetric("fw.sessions", "fw.m.expired")?.let { if (it > 0) add(WARNING, "expiredSessions", "fw-fw.sessions", it) }
     fwMetric("fw.jackson", "fw.m.objectMappers")?.let { if (it >= OBJECT_MAPPERS) add(INFO, "objectMappers", "fw-fw.jackson", it) }

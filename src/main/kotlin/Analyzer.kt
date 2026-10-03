@@ -55,10 +55,14 @@ data class HeapReport(
     /** Framework/technology inspectors (sessions, Hibernate, Spring, JDBC pools, caches, Jackson, exceptions). */
     val inspections: List<FwSection> = emptyList(),
     val metadata: DumpMetadata? = null,
+    /** Set by `--baseline`: comparison with earlier snapshots. */
+    val diff: DiffReport? = null,
     /** Sections restricted to application classes; rendered as a separate report, not embedded. */
     @Transient val app: AppView? = null,
     /** Every class (not only the top N); written to the snapshot only. */
     @Transient val histogram: List<ClassStat> = emptyList(),
+    /** Biggest collections by path signature; written to the snapshot only. */
+    @Transient val pathCollections: List<CollectionAtPath> = emptyList(),
 )
 
 @Serializable
@@ -94,7 +98,7 @@ fun HeapReport.appOnly(): HeapReport {
         leaks = a.leaks, gcRoots = emptyList(), threads = a.threads, duplicateStrings = emptyList(),
         largestArrays = a.largestArrays, classLoaders = emptyList(), proxies = a.proxies, appScope = a.scope, app = null,
         waste = null, references = null, offHeap = null, health = emptyList(), leakSuspects = null, mergedPaths = emptyList(),
-        retainedViews = null, concurrency = null, graph = null, inspections = emptyList(), metadata = null)
+        retainedViews = null, concurrency = null, graph = null, inspections = emptyList(), metadata = null, diff = null)
 }
 
 @Serializable
@@ -672,9 +676,10 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         opt.log(opt.msg["log.leaks"])
         val leakSuspects = guard("section.leaks", null) { leakSuspects(file, graph, opt.leakClasses, top) }
         val heap = Heap(graph, n, ids, clsOf, classAccs.map { it.name }, loaderOf, dom, retained)
+        val rootTypes = HashMap<Int, String>()
+        for (r in graph.gcRoots) graph.findObjectByIdOrNull(r.id)?.let { rootTypes.putIfAbsent(graph.indexOf(it), r::class.simpleName ?: "?") }
+        val pathCollections = guard("section.diff", emptyList()) { collectionsByPath(heap, bfs.parent, rootTypes, waste.bigCollections()) }
         val mergedPaths = guard("section.merged", emptyList()) {
-            val rootTypes = HashMap<Int, String>()
-            for (r in graph.gcRoots) graph.findObjectByIdOrNull(r.id)?.let { rootTypes.putIfAbsent(graph.indexOf(it), r::class.simpleName ?: "?") }
             val classAcc = accByName["java.lang.Class"]
             val biggest = classAccs.indices.filter { it != classAcc }
                 .sortedByDescending { if (opt.retained) classAccs[it].retained else classAccs[it].shallow }.take(MERGED_CLASSES)
@@ -759,7 +764,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             threads, duplicateStrings, arrays, classLoaders, warnings, jvm, vmArgs, frameworks,
             proxies = proxyReport { true }, waste = wasteReport, references = refReport, offHeap = offHeapReport,
             leakSuspects = leakSuspects, mergedPaths = mergedPaths, retainedViews = retainedViews, concurrency = concurrency,
-            graph = graphShape, inspections = inspections, metadata = metadata, app = app,
+            graph = graphShape, inspections = inspections, metadata = metadata, app = app, pathCollections = pathCollections,
             histogram = classAccs.sortedByDescending { it.shallow }
                 .map { ClassStat(it.name, it.count, it.shallow, if (opt.retained) it.retained else null) })
         return report.copy(health = guard("section.health", emptyList()) { health(report) })

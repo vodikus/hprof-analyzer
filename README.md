@@ -13,6 +13,15 @@ and produces a self-contained **HTML** report (interactive charts, works offline
 - Duplicate strings, largest arrays, class loaders
 - Generated classes / proxies (ByteBuddy, Hibernate, CGLIB, Mockito, Javassist, JDK Proxy) per base class, flagging uncached proxies that fill the metaspace
 - JVM environment (version, OS, command line, system properties) and detected frameworks
+- Health panel: automatic rules with severity that point to the relevant section
+- Leak suspects from JVM rules (terminated threads, stopped webapp class loaders, invalid sessions, closed streams), grouped by Shark's leak signature, application vs library leaks
+- Merged shortest paths by class (Sankey), retained by class loader / package (sunburst), static fields and immediate dominators
+- Memory waste: empty and under-filled collections, zeroed/sparse/duplicate arrays, boxing, mostly-null fields, header/padding estimate, string encoding
+- References and finalization (soft/weak/phantom, Finalizer queue), estimated off-heap memory (direct buffers, Netty, file descriptors)
+- Concurrency: thread states, pools and queue sizes, virtual threads, ThreadLocals, identical stacks
+- Framework inspectors: HTTP sessions, Hibernate, Spring, JDBC pools, caches, Jackson, retained exceptions
+- Graph structure (fan-in/out, depth, references between classes) and hprof file metadata
+- Dump comparison: `--format json` snapshots and `--baseline` to see what grows between dumps
 - Extra `<dump>-app` report with only your application's classes, auto-detected (`--app-package` to override)
 - Localized reports and messages (`--i18n`): Portuguese (pt-BR, default) and English (en)
 
@@ -38,7 +47,8 @@ Open `report/app.html` in a browser, or read `report/app.md`.
 | Option | Description |
 | --- | --- |
 | `--out <dir>` | Output directory (default `.`) |
-| `--format html,md` | Formats to generate (default both) |
+| `--format html,md,json` | Formats to generate (default `html,md`); `json` writes a snapshot for later comparison |
+| `--baseline a.json,b.json` | Compare this dump with earlier snapshots |
 | `--top <n>` | Rows per table (default 50) |
 | `--no-retained` | Skip the dominator tree: faster and uses less memory, but no retained sizes |
 | `--leak-class a.B,c.D` | Also find GC root paths for instances of these classes |

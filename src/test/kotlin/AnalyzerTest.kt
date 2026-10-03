@@ -218,6 +218,20 @@ class AnalyzerTest {
             assertTrue((records["STRING_IN_UTF8"] ?: 0) > 0 && (records["LOAD_CLASS"] ?: 0) > 0, "records: $records")
             listOf("## Frameworks e tecnologias", "## Estrutura do grafo", "## Metadados do arquivo").forEach { assertContains(toMarkdown(report), it) }
 
+            // phase 4: collections matched by path, diff against an earlier snapshot
+            val cachePath = report.pathCollections.first { "Holder.cache" in it.signature }
+            assertTrue(cachePath.size == 200L && cachePath.signature.endsWith("(java.util.concurrent.ConcurrentHashMap)"), "path: $cachePath")
+            val now = kotlinx.serialization.json.Json.decodeFromString<Snapshot>(toSnapshotJson(report))
+            assertEquals(report.pathCollections, now.collections)
+            val before = now.copy(summary = now.summary.copy(timestamp = "2000-01-01T00:00:00Z"),
+                collections = now.collections.map { if (it == cachePath) it.copy(size = 100) else it })
+            val diffed = report.copy(diff = diff(now, listOf(before), 30))
+            val cacheDelta = diffed.diff!!.collections.first { it.name == cachePath.signature }
+            assertEquals(listOf<Long?>(100, 200), cacheDelta.values)
+            assertTrue(cacheDelta.delta == 100L && cacheDelta.growing)
+            assertContains(toMarkdown(diffed), "## Comparação entre dumps")
+            assertContains(toHtml(diffed), "\"diff\":{")
+
             // a failed section is flagged at the top of both reports
             val warned = report.copy(warnings = listOf("Aviso: \"Caminhos até GC roots\" falhou, seção omitida: boom"))
             assertContains(toMarkdown(warned), "## Avisos")
@@ -258,6 +272,32 @@ class AnalyzerTest {
     fun log2Buckets() {
         assertEquals(listOf(0, 1, 2, 3, 3, 4, 4, 5), listOf(0L, 1, 2, 3, 4, 5, 8, 9).map(::log2Bucket))
         assertEquals(listOf("0", "1", "2", "3-4", "5-8", "9-16"), (0..5).map(::log2Label))
+    }
+
+    @Test
+    fun diffAcrossDumps() {
+        fun snap(ts: String, a: Long, b: Long?, coll: Long) = Snapshot(
+            Summary("$ts.hprof", 0, "", 8, ts, 0, 0, 0, 0, 0, 0, totalShallow = 100 + a, reachableCount = null,
+                reachableBytes = null, analysisMillis = 0, toolVersion = ""),
+            listOfNotNull(ClassStat("a.A", 1, a, null), b?.let { ClassStat("b.B", 1, it, null) }),
+            listOf(PackageStat("a", 1, a, null)),
+            listOf(CollectionAtPath("[StickyClass] class X → X.cache (java.util.HashMap)", 1, coll)),
+        )
+        // baselines out of order: sorted by timestamp, current last
+        val d = diff(snap("2026-03", 300, null, 30), listOf(snap("2026-02", 200, 50, 20), snap("2026-01", 100, 80, 10)), 10)
+        assertEquals(listOf("2026-01.hprof", "2026-02.hprof", "2026-03.hprof"), d.dumps.map { it.file })
+        val a = d.classes.first { it.name == "a.A" }
+        assertEquals(listOf<Long?>(100, 200, 300), a.values)
+        assertTrue(a.growing && a.delta == 200L)
+        val b = d.classes.first { it.name == "b.B" }
+        assertEquals(listOf<Long?>(80, 50, null), b.values)
+        assertTrue(!b.growing && b.delta == -80L)
+        assertTrue(d.collections.single().growing)
+        assertTrue(!isGrowing(listOf(1, 1)) && !isGrowing(listOf(5)))
+
+        val r = HeapReport(snap("x", 0, 0, 0).summary, emptyList(), emptyList(), emptyList(), null, emptyList(), emptyList(),
+            emptyList(), emptyList(), emptyList(), emptyList(), diff = d)
+        assertEquals(listOf("growingCollections", "heapGrowth"), health(r).map { it.key })
     }
 
     @Test

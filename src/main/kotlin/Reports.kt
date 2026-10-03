@@ -74,6 +74,24 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
     ))
     appendLine("> ${msg["note.sizes"]}\n")
 
+    r.diff?.let { d ->
+        section("section.diff")
+        appendLine("> ${msg["note.diff"]}\n")
+        table(listOf("summary.file", "summary.timestamp", "summary.totalShallow", "summary.reachableBytes", "summary.objects"),
+            d.dumps.map { listOf(it.file, it.timestamp, b(it.totalShallow), b(it.reachableBytes), n(it.objectCount)) })
+        fun deltas(title: String, first: String, list: List<Delta>, fmt: (Long?) -> String?) {
+            appendLine("### ${msg[title]}\n")
+            table(listOf(first, "col.first", "col.last", "col.delta", "col.growing"), list.map {
+                val sign = if (it.delta > 0) "+" else if (it.delta < 0) "−" else ""
+                listOf(it.name, fmt(it.values.first()), fmt(it.values.last()), sign + fmt(kotlin.math.abs(it.delta)),
+                    if (it.growing) "↗ ${msg["misc.yes"]}" else "")
+            })
+        }
+        deltas("diff.classes", "col.class", d.classes, ::b)
+        deltas("diff.packages", "col.package", d.packages, ::b)
+        deltas("diff.collections", "col.path", d.collections, ::n)
+    }
+
     section("section.jvm")
     appendLine("**${msg["jvm.frameworks"]}:** ${md(r.frameworks.joinToString().ifEmpty { msg["jvm.none"] })}\n")
     table(listOf("col.property", "col.value"), KEY_PROPS.mapNotNull { k -> r.jvm[k]?.let { listOf(k, it) } })

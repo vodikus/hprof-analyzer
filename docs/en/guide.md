@@ -69,6 +69,7 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [options]
 | `--no-retained` | off | Skip the dominator tree. About 2× faster and uses less memory, but retained sizes, the treemap and the "biggest objects" section are empty, and GC root paths are only computed for `--leak-class`. |
 | `--leak-class a.B,c.D` | — | Fully qualified class names. Up to 20 instances of these classes get a GC root path, in addition to the 10 biggest objects. |
 | `--app-package a.b,c.d` | auto | Application packages for the extra `<dump>-app.html`/`.md` report (application classes only). Without it, the main class package (`sun.java.command`) is used or, for a jar/launcher, everything outside the JDK, language and known frameworks/libraries. |
+| `--baseline a.json,b.json` | — | Snapshots of earlier dumps (made with `--format json`). The report gets the dump comparison section. |
 | `--i18n <code>` | `pt-BR` | Language of the reports and console messages. See [section 8](#8-languages-i18n). |
 | `-h`, `--help` | — | Print the version and usage (in the language given by `--i18n`). |
 | `-V`, `--version` | — | Print the version (`hprof-analyzer 1.0.0`) and exit. |
@@ -159,6 +160,23 @@ Largest object and primitive arrays with their length, size and retained size.
 ### ClassLoaders
 Every class loader instance with the number of classes it defined and its retained size. `<bootstrap>` stands for the
 JVM's built-in loader.
+
+### Dump comparison
+Only with `--baseline`. Make a snapshot of each dump with `--format json` and pass the earlier ones when analyzing
+the latest:
+
+```bash
+java -jar hprof-analyzer-all.jar day1.hprof --format json
+java -jar hprof-analyzer-all.jar day2.hprof --format json
+java -jar hprof-analyzer-all.jar day3.hprof --baseline day1.snapshot.json,day2.snapshot.json
+```
+
+Snapshots are ordered by dump timestamp. The section shows the change (Δ = current − first) in bytes per class and
+per package and in elements of the biggest collections, as a diverging bar (grew vs shrank) and as the trend of a
+chosen item. "Growing" flags what is present in every dump and larger in each one. Object ids change between dumps,
+so collections are matched by the signature of their path from the GC root (e.g.
+`[StickyClass] class X → X.cache (java.util.HashMap)`). The health panel warns when collections grow in every dump
+(3 or more) and when the heap grows over 20%.
 
 ### Health panel
 First section of the full report. Automatic rules with a severity (critical, warning, info) and a link to the section:
@@ -315,7 +333,8 @@ Key groups: `cli.*` (usage and errors), `log.*` (progress), `report.*`, `section
 | `src/main/kotlin/Graph.kt` | Fan-in/fan-out, depth and edges between classes. |
 | `src/main/kotlin/Frameworks.kt` | Session, Hibernate, Spring, JDBC, cache, Jackson and exception inspectors. |
 | `src/main/kotlin/Health.kt` | Health panel rules (a pure function over `HeapReport`). |
-| `src/main/kotlin/Snapshot.kt` | JSON snapshot with the full histogram (`--format json`). |
+| `src/main/kotlin/Snapshot.kt` | JSON snapshot with the full histogram and the collections by path (`--format json`). |
+| `src/main/kotlin/Diff.kt` | Comparison with earlier snapshots (`--baseline`). |
 | `src/main/kotlin/Reports.kt` | Markdown and HTML generation. |
 | `src/main/kotlin/I18n.kt` | Loads language files and formats messages. |
 | `src/main/resources/report.html` | HTML template: CSS and the JavaScript that renders tables and charts. |
