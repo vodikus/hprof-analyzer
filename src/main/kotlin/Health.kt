@@ -17,6 +17,7 @@ private const val LOW_FILL = 0.25
 private const val MIN_FILL_INSTANCES = 1000
 private const val FINALIZER_QUEUE = 10_000L
 private const val POOL_QUEUE = 10_000
+private const val OBJECT_MAPPERS = 10L
 private const val WEBAPP_LOADERS = 2
 private const val DUP_STRINGS = 0.10
 private const val EMPTY_COLLECTIONS = 0.05
@@ -36,6 +37,9 @@ internal fun health(r: HeapReport): List<HealthFinding> = buildList {
     }
     r.references?.finalizerQueue?.let { if (it > FINALIZER_QUEUE) add(CRITICAL, "finalizerQueue", "references", it) }
     r.concurrency?.pools?.filter { (it.queued ?: 0) > POOL_QUEUE }?.forEach { add(CRITICAL, "poolQueue", "concurrency", it.className, it.queued!!) }
+    fun fwMetric(section: String, key: String) = r.inspections.firstOrNull { it.key == section }?.metrics?.firstOrNull { it.key == key }?.value
+    fwMetric("fw.sessions", "fw.m.expired")?.let { if (it > 0) add(WARNING, "expiredSessions", "fw-fw.sessions", it) }
+    fwMetric("fw.jackson", "fw.m.objectMappers")?.let { if (it >= OBJECT_MAPPERS) add(INFO, "objectMappers", "fw-fw.jackson", it) }
     r.leakSuspects?.groups?.count { it.kind == "application" }?.let { if (it > 0) add(WARNING, "leakSuspects", "leaks", it) }
     r.waste?.collections?.filter { it.count >= MIN_FILL_INSTANCES && it.capacity > 0 }?.let { big ->
         val size = big.sumOf { it.size }.toDouble()

@@ -638,6 +638,87 @@ const DATA = /*DATA*/;
     { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
   ], DATA.classLoaders));
 
+  // ---- Frameworks e tecnologias ----
+  const fws = DATA.inspections || [];
+  if (fws.length) {
+    const fs = section('frameworks', t('section.inspections'), t('note.inspections'));
+    fws.forEach(fw => {
+      fs.append(el('h3', { id: 'fw-' + fw.key, text: t(fw.key) }));
+      fs.append(el('div', { class: 'tiles' }, ...fw.metrics.map(m => tile(t(m.key), m.bytes ? bytes(m.value) : num(m.value)))));
+      fw.tables.forEach(tb => {
+        fs.append(el('p', null, el('b', { text: t(tb.title) })));
+        const cols = tb.columns.map((c, i) => c.type === 'text'
+          ? { h: t(c.key), v: r => r[i], mono: i === 0 }
+          : { h: t(c.key), v: r => r[i] == null ? null : Number(r[i]), f: c.type === 'bytes' ? bytes : num, num: true });
+        // bar of the first numeric column (bytes preferred) by the first text column
+        const k = tb.columns.findIndex(c => c.type === 'bytes') >= 0 ? tb.columns.findIndex(c => c.type === 'bytes') : tb.columns.findIndex(c => c.type === 'num');
+        const label = tb.columns.findIndex(c => c.type === 'text');
+        const items = tb.rows.filter(r => Number(r[k]) > 0).slice(0, 15).map(r => ({ name: r[label] ?? '-', value: Number(r[k]) }));
+        if (k >= 0 && label >= 0 && items.length > 1) chart(fs, () => hbar(items, tb.columns[k].type === 'bytes' ? bytes : num), barHeight(items.length));
+        fs.append(table(cols, tb.rows));
+      });
+    });
+  }
+
+  // ---- Estrutura do grafo ----
+  const gs = DATA.graph;
+  if (gs) {
+    const gsec = section('graph', t('section.graph'), t('note.graph'));
+    gsec.append(el('div', { class: 'tiles' }, tile(t('graph.maxDepth'), num(gs.maxDepth))));
+    gsec.append(el('h3', { text: t('graph.depths') }));
+    chart(gsec, () => vbar(gs.depths.map(b => ({ name: b.label, value: b.count })), num), 280);
+    const degreeCols = [
+      { h: t('col.id'), v: r => r.id, mono: true },
+      { h: t('col.class'), v: r => r.className, mono: true },
+      { h: t('col.degree'), v: r => r.degree, f: num, num: true },
+      { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    ];
+    [['graph.fanIn', gs.fanIn], ['graph.fanOut', gs.fanOut]].forEach(([k, list]) => {
+      gsec.append(el('h3', { text: t(k) }));
+      const top = (list || []).slice(0, 15);
+      if (top.length) chart(gsec, () => hbar(top.map(o => ({ name: `${o.className} ${o.id}`, value: o.degree })), num), barHeight(top.length));
+      gsec.append(table(degreeCols, list || []));
+    });
+    const ce = gs.classEdges || [];
+    if (ce.length) {
+      gsec.append(el('h3', { text: t('graph.classEdges') }));
+      const names = [...new Set(ce.flatMap(e => [e.source, e.target]))];
+      const max = Math.max(...ce.map(e => e.count));
+      chart(gsec, () => ({
+        textStyle: baseText(),
+        tooltip: tooltip({ formatter: p => p.dataType === 'edge'
+          ? `${esc(p.data.source)} → ${esc(p.data.target)}<br><b>${num(p.data.value)}</b>` : esc(p.name) }),
+        series: [{
+          type: 'graph', layout: 'circular', circular: { rotateLabel: true }, roam: true, top: 80, bottom: 80, left: 160, right: 160,
+          data: names.map(name => ({ name, symbolSize: 8, itemStyle: { color: css('--series-1') } })),
+          links: ce.filter(e => e.source !== e.target).map(e => ({ source: e.source, target: e.target, value: e.count,
+            lineStyle: { width: 1 + 5 * e.count / max } })),
+          edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 6,
+          label: { show: true, position: 'right', color: css('--text-2'), fontSize: 10, formatter: p => short(p.name).slice(-32) },
+          lineStyle: { color: css('--seq-3'), opacity: 0.55, curveness: 0.3 },
+          emphasis: { focus: 'adjacency', lineStyle: { color: css('--series-1') } },
+        }],
+      }), 680);
+      gsec.append(table([
+        { h: t('col.source'), v: r => r.source, mono: true },
+        { h: t('col.target'), v: r => r.target, mono: true },
+        { h: t('col.count'), v: r => r.count, f: num, num: true },
+      ], ce));
+    }
+  }
+
+  // ---- Metadados do arquivo ----
+  const md = DATA.metadata;
+  if (md) {
+    const ms = section('metadata', t('section.metadata'), t('note.metadata'));
+    ms.append(el('div', { class: 'tiles' },
+      tile(t('meta.ratio'), s.totalShallow ? (s.fileSize / s.totalShallow).toLocaleString(LOCALE, { maximumFractionDigits: 2 }) : '-'),
+      tile(t('meta.gcs'), md.garbageCollectors.join(', ') || '-')));
+    if (md.memoryFlags.length) ms.append(el('h3', { text: t('meta.flags') }), el('pre', { class: 'mono', text: md.memoryFlags.join('\n') }));
+    ms.append(el('h3', { text: t('meta.records') }));
+    chart(ms, () => hbar(md.records.map(r => ({ name: r.name, value: r.count })), num), barHeight(md.records.length));
+  }
+
   // ---- Desperdício ----
   const w = DATA.waste;
   if (w) {

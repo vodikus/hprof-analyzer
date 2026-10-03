@@ -4,13 +4,12 @@ import kotlinx.serialization.Serializable
 import shark.GcRoot
 import shark.HeapGraph
 import shark.HeapObject.HeapInstance
-import shark.HprofRecord.LoadClassRecord
 import shark.HprofRecord.StackFrameRecord
 import shark.HprofRecord.StackTraceRecord
-import shark.HprofRecord.StringRecord
+import shark.HprofRecordTag
 import shark.StreamingHprofReader
-import shark.StreamingRecordReaderAdapter.Companion.asStreamingRecordReader
 import java.io.File
+import java.util.EnumSet
 
 @Serializable
 data class ConcurrencyReport(
@@ -142,21 +141,28 @@ internal class ConcurrencyCollector : Collector() {
     }
 }
 
-/** Platform threads (ThreadObject GC roots) with stacks, locals, state and ThreadLocals; [tlValues] gets the value classes. */
-internal fun readThreads(file: File, graph: HeapGraph, retained: LongArray?, tlValues: MutableMap<String, Int>): List<ThreadInfo> {
+/** Top-level hprof records (heap dump sub-records are counted in the summary instead). */
+private val TOP_LEVEL_TAGS = EnumSet.range(HprofRecordTag.STRING_IN_UTF8, HprofRecordTag.CONTROL_SETTINGS)
+
+/**
+ * Platform threads (ThreadObject GC roots) with stacks, locals, state and ThreadLocals; [tlValues] gets the value
+ * classes and [records] the count of each top-level record tag (same pass over the file).
+ */
+internal fun readThreads(
+    file: File, graph: HeapGraph, retained: LongArray?, tlValues: MutableMap<String, Int>, records: MutableMap<String, Int>,
+): List<ThreadInfo> {
     val strings = HashMap<Long, String>()
     val classNameIdBySerial = HashMap<Int, Long>()
     val frames = HashMap<Long, StackFrameRecord>()
     val traces = HashMap<Int, StackTraceRecord>()
-    StreamingHprofReader.readerFor(file).asStreamingRecordReader().readRecords(
-        setOf(StringRecord::class, LoadClassRecord::class, StackFrameRecord::class, StackTraceRecord::class)
-    ) { _, r ->
-        when (r) {
-            is StringRecord -> strings[r.id] = r.string
-            is LoadClassRecord -> classNameIdBySerial[r.classSerialNumber] = r.classNameStringId
-            is StackFrameRecord -> frames[r.id] = r
-            is StackTraceRecord -> traces[r.stackTraceSerialNumber] = r
-            else -> Unit
+    StreamingHprofReader.readerFor(file).readRecords(TOP_LEVEL_TAGS) { tag, length, reader ->
+        records.merge(tag.name, 1, Int::plus)
+        when (tag) {
+            HprofRecordTag.STRING_IN_UTF8 -> reader.readStringRecord(length).let { strings[it.id] = it.string }
+            HprofRecordTag.LOAD_CLASS -> reader.readLoadClassRecord().let { classNameIdBySerial[it.classSerialNumber] = it.classNameStringId }
+            HprofRecordTag.STACK_FRAME -> reader.readStackFrameRecord().let { frames[it.id] = it }
+            HprofRecordTag.STACK_TRACE -> reader.readStackTraceRecord().let { traces[it.stackTraceSerialNumber] = it }
+            else -> reader.skip(length)
         }
     }
 

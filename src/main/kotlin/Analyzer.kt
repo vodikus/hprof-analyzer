@@ -51,6 +51,10 @@ data class HeapReport(
     val mergedPaths: List<MergedPaths> = emptyList(),
     val retainedViews: RetainedReport? = null,
     val concurrency: ConcurrencyReport? = null,
+    val graph: GraphReport? = null,
+    /** Framework/technology inspectors (sessions, Hibernate, Spring, JDBC pools, caches, Jackson, exceptions). */
+    val inspections: List<FwSection> = emptyList(),
+    val metadata: DumpMetadata? = null,
     /** Sections restricted to application classes; rendered as a separate report, not embedded. */
     @Transient val app: AppView? = null,
     /** Every class (not only the top N); written to the snapshot only. */
@@ -90,7 +94,7 @@ fun HeapReport.appOnly(): HeapReport {
         leaks = a.leaks, gcRoots = emptyList(), threads = a.threads, duplicateStrings = emptyList(),
         largestArrays = a.largestArrays, classLoaders = emptyList(), proxies = a.proxies, appScope = a.scope, app = null,
         waste = null, references = null, offHeap = null, health = emptyList(), leakSuspects = null, mergedPaths = emptyList(),
-        retainedViews = null, concurrency = null)
+        retainedViews = null, concurrency = null, graph = null, inspections = emptyList(), metadata = null)
 }
 
 @Serializable
@@ -143,6 +147,10 @@ data class PathNode(
 @Serializable
 data class NamedCount(val name: String, val count: Int)
 
+/** File-level facts: hprof record counts by tag, collectors and memory flags seen in the heap. */
+@Serializable
+data class DumpMetadata(val records: List<NamedCount>, val garbageCollectors: List<String>, val memoryFlags: List<String>)
+
 @Serializable
 data class ThreadInfo(
     val name: String,
@@ -190,6 +198,7 @@ internal const val MAX_DEDUP_STRING = 1024
 private const val MAX_STRING_SHOWN = 200
 private const val SUSPECTS = 10
 private const val MERGED_CLASSES = 5
+private val MEMORY_FLAG = Regex("GC|Heap|RAM|Metaspace|Size|Ratio|Oops")
 
 private class IntList(cap: Int) {
     var data = IntArray(maxOf(cap, 16))
@@ -278,22 +287,8 @@ internal fun HeapInstance.field(name: String) = readFields().firstOrNull { it.na
 internal fun HeapInstance.refField(name: String) = field(name)?.asObject
 
 /** Entries of a Properties / Hashtable / HashMap / ConcurrentHashMap (JDK 8+): walks `table` buckets via `next`. */
-private fun readMap(map: HeapInstance): Map<String, String> {
-    map.refField("map")?.asInstance?.let { return readMap(it) } // JDK 9+ Properties wraps a ConcurrentHashMap
-    val out = HashMap<String, String>()
-    val table = map.refField("table")?.asObjectArray ?: return out
-    for (bucket in table.readElements()) {
-        var e = bucket.asObject?.asInstance
-        var hops = 0
-        while (e != null && hops++ < 10_000) { // bound: a corrupt dump could loop
-            val k = e.field("key")?.readAsJavaString()
-            val v = (e.field("val") ?: e.field("value"))?.readAsJavaString()
-            if (k != null && v != null) out[k] = v
-            e = e.refField("next")?.asInstance
-        }
-    }
-    return out
-}
+private fun readMap(map: HeapInstance): Map<String, String> = mapEntries(map)
+    .mapNotNull { (k, v) -> k.readAsJavaString()?.let { key -> v.readAsJavaString()?.let { key to it } } }.toMap()
 
 /** ArrayList / Arrays.asList / List.of, optionally behind Collections.unmodifiableList. */
 private fun readList(list: HeapInstance): List<String> {
@@ -464,6 +459,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val refs = RefCollector(graph)
         val offHeap = OffHeapCollector()
         val conc = ConcurrencyCollector()
+        val fw = FrameworkCollector()
         // defining ClassLoader of each object's class, as a small index (0 = bootstrap)
         val loaderOf = IntArray(n)
         val loaderIndex = hashMapOf(0L to 0)
@@ -526,6 +522,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                     refs.instance(obj, name, fields)
                     offHeap.instance(name, fields)
                     conc.instance(obj, name)
+                    fw.instance(obj)
                     if (isLoaderClass.getOrPut(obj.instanceClassId) { obj instanceOf "java.lang.ClassLoader" }) {
                         loaderIds.add(obj.objectId)
                     }
@@ -559,7 +556,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val fill = offsets.copyOf(n + 1)
         for (i in 0 until edgeSrc.size) targets[fill[edgeSrc.data[i]]++] = edgeDst.data[i]
         edgeSrc.data = IntArray(0); edgeDst.data = IntArray(0)
-        val bfsParent = bfsParents(n + 1, n, offsets, targets)
+        val bfs = bfs(n + 1, n, offsets, targets)
 
         // ---- dominator tree / retained sizes ----
         var dom: Dominators? = null
@@ -626,7 +623,8 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         }
         opt.log(opt.msg["log.threads"])
         val tlValues = HashMap<String, Int>()
-        val threads = guard("section.threads", emptyList()) { readThreads(file, graph, retained, tlValues) }
+        val records = HashMap<String, Int>()
+        val threads = guard("section.threads", emptyList()) { readThreads(file, graph, retained, tlValues, records) }
 
         // ---- strings / arrays / class loaders ----
         val duplicateStrings = guard("section.strings", emptyList()) {
@@ -680,7 +678,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             val classAcc = accByName["java.lang.Class"]
             val biggest = classAccs.indices.filter { it != classAcc }
                 .sortedByDescending { if (opt.retained) classAccs[it].retained else classAccs[it].shallow }.take(MERGED_CLASSES)
-            mergedPaths(heap, bfsParent, rootTypes, (biggest + opt.leakClasses.mapNotNull { accByName[it] }).distinct())
+            mergedPaths(heap, bfs.parent, rootTypes, (biggest + opt.leakClasses.mapNotNull { accByName[it] }).distinct())
         }
         val retainedViews = guard("section.retainedViews", null) {
             if (dom == null) return@guard null
@@ -688,6 +686,18 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             for ((id, i) in loaderIndex) labels[i] = if (id == 0L) "<bootstrap>"
                 else graph.findObjectByIdOrNull(id)?.let { "${it.className()} @${hex(id)}" } ?: hex(id)
             retainedViews(heap, labels.map { it ?: "?" }, top, opt.msg)
+        }
+        val graphShape = guard("section.graph", null) { graphReport(heap, offsets, targets, bfs.depthCounts, top) }
+        val inspections = guard("section.inspections", emptyList()) {
+            inspectFrameworks(fw, heap, classAccs.associate { it.name to it.count }, header.heapDumpTimestamp, top) { key, block ->
+                guard(key, null, block)
+            }
+        }
+        val metadata = guard("section.metadata", null) {
+            val gcs = graph.findClassByName("sun.management.GarbageCollectorImpl")?.instances
+                ?.mapNotNull { it["sun.management.MemoryManagerImpl", "name"]?.value?.readAsJavaString() }?.distinct()?.sorted()?.toList().orEmpty()
+            DumpMetadata(records.map { NamedCount(it.key, it.value) }.sortedByDescending { it.count }, gcs,
+                vmArgs.filter { a -> a.startsWith("-Xm") || a.startsWith("-Xs") || (a.startsWith("-XX:") && MEMORY_FLAG.containsMatchIn(a)) })
         }
 
         val summary = Summary(
@@ -748,7 +758,8 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val report = HeapReport(summary, classStats(classAccs), packageStats(classAccs), retainedObjects, tree, leaks, gcRoots,
             threads, duplicateStrings, arrays, classLoaders, warnings, jvm, vmArgs, frameworks,
             proxies = proxyReport { true }, waste = wasteReport, references = refReport, offHeap = offHeapReport,
-            leakSuspects = leakSuspects, mergedPaths = mergedPaths, retainedViews = retainedViews, concurrency = concurrency, app = app,
+            leakSuspects = leakSuspects, mergedPaths = mergedPaths, retainedViews = retainedViews, concurrency = concurrency,
+            graph = graphShape, inspections = inspections, metadata = metadata, app = app,
             histogram = classAccs.sortedByDescending { it.shallow }
                 .map { ClassStat(it.name, it.count, it.shallow, if (opt.retained) it.retained else null) })
         return report.copy(health = guard("section.health", emptyList()) { health(report) })

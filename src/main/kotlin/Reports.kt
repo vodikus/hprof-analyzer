@@ -235,6 +235,51 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
     }
 
     fun sub(key: String) = appendLine("### ${msg[key]}\n")
+    if (r.inspections.isNotEmpty()) {
+        section("section.inspections")
+        appendLine("> ${msg["note.inspections"]}\n")
+        r.inspections.forEach { fw ->
+            appendLine("### ${msg[fw.key]}\n")
+            appendLine(fw.metrics.joinToString(" · ") { "**${msg[it.key]}:** ${if (it.bytes) b(it.value) else n(it.value)}" } + "\n")
+            fw.tables.forEach { tb ->
+                appendLine("**${msg[tb.title]}**\n")
+                table(tb.columns.map { it.key }, tb.rows.map { row ->
+                    row.mapIndexed { i, cell ->
+                        when (tb.columns[i].type) {
+                            "bytes" -> b(cell?.toLongOrNull())
+                            "num" -> cell?.toLongOrNull()?.let(::n) ?: cell
+                            else -> cell
+                        }
+                    }
+                })
+            }
+        }
+    }
+
+    r.graph?.let { g ->
+        section("section.graph")
+        appendLine("> ${msg["note.graph"]}\n")
+        appendLine("**${msg["graph.maxDepth"]}:** ${n(g.maxDepth)}\n")
+        appendLine("### ${msg["graph.depths"]}\n")
+        table(listOf("graph.maxDepth", "col.objects"), g.depths.map { listOf(it.label, n(it.count)) })
+        appendLine("### ${msg["graph.fanIn"]}\n")
+        table(listOf("col.id", "col.class", "col.degree", "col.retained"), g.fanIn.map { listOf(it.id, it.className, n(it.degree), b(it.retained)) })
+        appendLine("### ${msg["graph.fanOut"]}\n")
+        table(listOf("col.id", "col.class", "col.degree", "col.retained"), g.fanOut.map { listOf(it.id, it.className, n(it.degree), b(it.retained)) })
+        appendLine("### ${msg["graph.classEdges"]}\n")
+        table(listOf("col.source", "col.target", "col.count"), g.classEdges.map { listOf(it.source, it.target, n(it.count)) })
+    }
+
+    r.metadata?.let { m ->
+        section("section.metadata")
+        appendLine("> ${msg["note.metadata"]}\n")
+        val ratio = if (s.totalShallow > 0) String.format(msg.locale, "%.2f", s.fileSize.toDouble() / s.totalShallow) else "-"
+        appendLine("**${msg["meta.ratio"]}:** $ratio · **${msg["meta.gcs"]}:** ${md(m.garbageCollectors.joinToString().ifEmpty { "-" })}\n")
+        if (m.memoryFlags.isNotEmpty()) appendLine("**${msg["meta.flags"]}:** `${m.memoryFlags.joinToString(" ")}`\n")
+        appendLine("### ${msg["meta.records"]}\n")
+        table(listOf("col.type", "col.count"), m.records.map { listOf(it.name, n(it.count)) })
+    }
+
     r.waste?.let { w ->
         section("section.waste")
         appendLine("> ${msg["note.waste"]}\n")

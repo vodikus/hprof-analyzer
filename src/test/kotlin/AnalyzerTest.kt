@@ -19,6 +19,9 @@ object Holder {
 
     /** Waste / references / off-heap fixtures. */
     var waste: List<Any> = emptyList()
+
+    /** Home-made static cache: shows up under frameworks / caches. */
+    var cache: Map<String, String> = emptyMap()
 }
 
 class AnalyzerTest {
@@ -110,7 +113,9 @@ class AnalyzerTest {
             List(30) { java.lang.ref.SoftReference(Any()) },
             List(40) { java.lang.ref.WeakReference(Any()) },
             Thread {}.apply { name = "finished-worker"; start(); join() }, // terminated, still referenced: leak rule
+            List(5) { RuntimeException("boom") },
         )
+        Holder.cache = java.util.concurrent.ConcurrentHashMap((1..200).associate { "k$it" to "v$it" })
         val gate = java.util.concurrent.CountDownLatch(1)
         val pool = java.util.concurrent.Executors.newFixedThreadPool(3)
         repeat(23) { pool.execute { gate.await() } } // 3 running (identical stacks), 20 queued
@@ -200,6 +205,19 @@ class AnalyzerTest {
             listOf("## Suspeitas de leak", "## Caminhos agregados por classe", "## Retained agregado", "## Concorrência")
                 .forEach { assertContains(toMarkdown(report), it) }
 
+            // phase 3: frameworks, graph, metadata
+            val caches = report.inspections.first { it.key == "fw.caches" }
+            assertTrue(caches.tables.single().rows.any { it[1] == "hprof.Holder.cache" && it[2] == "200" }, "caches: ${caches.tables}")
+            val throwables = report.inspections.first { it.key == "fw.throwables" }
+            assertTrue(throwables.tables.single().rows.any { it[0] == "java.lang.RuntimeException" && it[1] == "boom" && it[2]!!.toInt() >= 5 },
+                "throwables: ${throwables.tables.single().rows.take(5)}")
+            val g = report.graph!!
+            assertTrue(g.fanIn.isNotEmpty() && g.depths.isNotEmpty() && g.classEdges.isNotEmpty())
+            assertTrue(g.fanOut.first().degree >= 1000, "fan-out: ${g.fanOut.take(3)}")
+            val records = report.metadata!!.records.associate { it.name to it.count }
+            assertTrue((records["STRING_IN_UTF8"] ?: 0) > 0 && (records["LOAD_CLASS"] ?: 0) > 0, "records: $records")
+            listOf("## Frameworks e tecnologias", "## Estrutura do grafo", "## Metadados do arquivo").forEach { assertContains(toMarkdown(report), it) }
+
             // a failed section is flagged at the top of both reports
             val warned = report.copy(warnings = listOf("Aviso: \"Caminhos até GC roots\" falhou, seção omitida: boom"))
             assertContains(toMarkdown(warned), "## Avisos")
@@ -231,6 +249,7 @@ class AnalyzerTest {
             Holder.marker = null
             Holder.proxies = emptyList()
             Holder.waste = emptyList()
+            Holder.cache = emptyMap()
             gate.countDown(); pool.shutdown(); threadLocal.remove()
         }
     }
@@ -239,6 +258,13 @@ class AnalyzerTest {
     fun log2Buckets() {
         assertEquals(listOf(0, 1, 2, 3, 3, 4, 4, 5), listOf(0L, 1, 2, 3, 4, 5, 8, 9).map(::log2Bucket))
         assertEquals(listOf("0", "1", "2", "3-4", "5-8", "9-16"), (0..5).map(::log2Label))
+    }
+
+    @Test
+    fun depthBucketLabels() {
+        val counts = LongArray(70).also { it[1] = 5; it[20] = 1; it[21] = 2; it[32] = 3; it[33] = 4; it[69] = 1 }
+        assertEquals(listOf("1" to 5L, "20" to 1L, "21-32" to 5L, "33-64" to 4L, "65-128" to 1L),
+            depthBuckets(counts).map { it.label to it.count })
     }
 
     @Test

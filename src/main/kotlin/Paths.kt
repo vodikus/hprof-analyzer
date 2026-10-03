@@ -19,22 +19,32 @@ private const val MAX_HOPS = 8
 private const val MAX_LINKS = 40
 private const val MIN_SHARE = 0.02
 
-/** BFS tree from the virtual root [root] over the CSR graph: parent per node, -1 if unreachable (parent[root] = root). */
-internal fun bfsParents(n: Int, root: Int, offsets: IntArray, targets: IntArray): IntArray {
+/** [parent]: BFS tree parent per node, -1 if unreachable (parent[root] = root). [depthCounts][d]: nodes d hops from the roots. */
+internal class Bfs(val parent: IntArray, val depthCounts: LongArray)
+
+/** BFS from the virtual root [root] over the CSR graph. */
+internal fun bfs(n: Int, root: Int, offsets: IntArray, targets: IntArray): Bfs {
     val parent = IntArray(n) { -1 }
     val queue = IntArray(n)
+    val depth = IntArray(n)
     parent[root] = root
     queue[0] = root
     var head = 0
     var tail = 1
+    var maxDepth = 0
     while (head < tail) {
         val v = queue[head++]
         for (e in offsets[v] until offsets[v + 1]) {
             val w = targets[e]
-            if (parent[w] == -1) { parent[w] = v; queue[tail++] = w }
+            if (parent[w] == -1) {
+                parent[w] = v; depth[w] = depth[v] + 1; queue[tail++] = w
+                if (depth[w] > maxDepth) maxDepth = depth[w]
+            }
         }
     }
-    return parent
+    val counts = LongArray(maxDepth + 1)
+    for (i in 1 until tail) counts[depth[queue[i]]]++ // depth 0 = virtual root, not counted
+    return Bfs(parent, counts)
 }
 
 internal fun mergedPaths(h: Heap, parent: IntArray, rootTypes: Map<Int, String>, accs: List<Int>): List<MergedPaths> = accs.map { acc ->

@@ -189,6 +189,30 @@ threads, tipo e tamanho da fila), `ForkJoinPool`, `Timer`, virtual threads e o r
 valores em `ThreadLocal`, stacks idênticas agrupadas e um sunburst dos frames a partir do topo da stack. A tabela de
 threads ganhou estado, retained de locals, retained e contagem de `ThreadLocal`s e entradas órfãs (chave coletada).
 
+### Frameworks e tecnologias
+Inspetores que só aparecem quando as classes estão no dump, lendo campos internos de cada biblioteca:
+- **Sessões HTTP** (Tomcat `StandardSession`, Jetty): quantidade, expiradas/inválidas ainda retidas, maiores sessões e
+  retained por nome de atributo.
+- **Hibernate**: contextos de persistência (`StatefulPersistenceContext`) e entidades gerenciadas em cada um.
+- **Spring**: singletons de cada `DefaultListableBeanFactory` e os beans mais pesados.
+- **JDBC**: pools HikariCP e DBCP2 (conexões, ociosas, ativas) e quantidade de `Statement`/`ResultSet` dos drivers.
+- **Caches**: Caffeine, Guava, Ehcache e mapas estáticos com 100 ou mais entradas.
+- **Jackson**: quantidade de `ObjectMapper` (muitos indicam criação por requisição).
+- **Exceções retidas**: `Throwable` agrupados por tipo e mensagem, com retained (inclui o `backtrace`).
+
+Versões muito diferentes das bibliotecas podem deixar valores em branco; uma falha num inspetor vira aviso e não
+derruba os outros.
+
+### Estrutura do grafo
+Objetos mais referenciados (fan-in) e com mais referências de saída (fan-out), histograma de profundidade até GC root
+(menor caminho) e grafo circular das 50 referências mais frequentes entre classes. As arestas instância → classe,
+adicionadas só para manter classes vivas, ficam de fora.
+
+### Metadados do arquivo
+Contagem de registros de nível superior do hprof por tipo (lidos no mesmo passe dos stack traces), razão tamanho do
+arquivo / shallow total, coletores de GC registrados como MXBean no heap e flags de memória/GC quando os argumentos da
+JVM estão no heap.
+
 ### Desperdício de memória
 - **Coleções**: `ArrayList`, `Vector`, `HashMap`, `LinkedHashMap`, `WeakHashMap`, `Hashtable`, `ConcurrentHashMap` e
   `ArrayDeque` (só as classes exatas; `HashSet` aparece como o seu `HashMap` interno). Por tipo: vazias com array
@@ -293,6 +317,8 @@ Grupos de chaves: `cli.*` (uso e erros), `log.*` (progresso), `report.*`, `secti
 | `src/main/kotlin/Paths.kt` | Árvore BFS dos GC roots e caminhos agregados por classe. |
 | `src/main/kotlin/Retained.kt` | Retained por ClassLoader, campos estáticos e dominadores imediatos por classe. |
 | `src/main/kotlin/Threads.kt` | Threads, pools, virtual threads, ThreadLocals, stacks agrupadas. |
+| `src/main/kotlin/Graph.kt` | Fan-in/fan-out, profundidade e arestas entre classes. |
+| `src/main/kotlin/Frameworks.kt` | Inspetores de sessões, Hibernate, Spring, JDBC, caches, Jackson e exceções. |
 | `src/main/kotlin/Health.kt` | Regras do painel de saúde (função pura sobre o `HeapReport`). |
 | `src/main/kotlin/Snapshot.kt` | Snapshot JSON com o histograma completo (`--format json`). |
 | `src/main/kotlin/Reports.kt` | Geração do Markdown e do HTML. |
