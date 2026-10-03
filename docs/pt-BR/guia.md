@@ -64,7 +64,7 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [opções]
 | Opção | Padrão | Descrição |
 | --- | --- | --- |
 | `--out <dir>` | `.` | Diretório de saída, criado se não existir. Os arquivos recebem o nome do dump (`app.hprof` → `app.html`, `app.md`). |
-| `--format html,md` | `html,md` | Lista de formatos separados por vírgula. |
+| `--format html,md` | `html,md` | Lista de formatos separados por vírgula. `json` grava `<dump>.snapshot.json` com o histograma completo (base para comparar dumps). |
 | `--top <n>` | `50` | Linhas em cada tabela (classes, objetos, strings, arrays). |
 | `--no-retained` | desligado | Pula a dominator tree. Cerca de 2× mais rápido e usa menos memória, mas ficam vazios os retained sizes, o treemap e a seção de maiores objetos, e os caminhos até GC root só são calculados para `--leak-class`. |
 | `--leak-class a.B,c.D` | — | Nomes completos de classes. Até 20 instâncias dessas classes ganham caminho até GC root, além dos 10 maiores objetos. |
@@ -160,6 +160,37 @@ Maiores object arrays e primitive arrays, com tamanho (elementos), bytes e retai
 Cada instância de class loader com o número de classes que ela definiu e o retained size. `<bootstrap>` representa o
 loader nativo da JVM.
 
+### Painel de saúde
+Primeira seção do relatório completo. Regras automáticas com severidade (crítico, alerta, info) e link para a seção:
+um objeto retendo mais de 30% do heap alcançável, fila do Finalizer acima de 10 mil, coleções grandes com fill ratio
+médio abaixo de 25%, 2 ou mais ClassLoaders de webapp (Tomcat/Jetty), strings duplicadas acima de 10% do heap, grupos
+de proxies suspeitos e coleções vazias com array alocado acima de 5% do heap. Os limiares ficam em `Health.kt`.
+
+### Desperdício de memória
+- **Coleções**: `ArrayList`, `Vector`, `HashMap`, `LinkedHashMap`, `WeakHashMap`, `Hashtable`, `ConcurrentHashMap` e
+  `ArrayDeque` (só as classes exatas; `HashSet` aparece como o seu `HashMap` interno). Por tipo: vazias com array
+  alocado, elementos, capacidade e bytes de slots livres. Gráficos de fill ratio e de número de elementos.
+- **Arrays**: primitive arrays todos zero (≥ 64 B), object arrays todo null ou ≥ 90% null, e primitive arrays de
+  conteúdo idêntico (≥ 256 B, hash de 64 bits; arrays de Strings ficam de fora porque já estão em strings duplicadas).
+- **Boxing**: instâncias de `Integer`, `Long`, `Boolean`... "Redundantes" são cópias de um valor que a JVM mantém em
+  cache (-128..127, `true`/`false`): indicam `new Integer(...)`.
+- **Campos quase sempre null**: classes com ≥ 1000 instâncias e campos de referência ≥ 90% null (heatmap).
+- **Header e padding**: estimativa para JVM 64-bit com compressed class pointers (header 12 B, arrays 16 B,
+  alinhamento 8 B), já que o hprof não guarda header.
+- **Strings**: LATIN1 × UTF16 (campo `coder`; JDK 8 conta como UTF16), vazias, distribuição de tamanho e prefixos
+  mais comuns.
+
+### Referências e finalização
+Contagem de soft, weak, phantom e final references, referents ainda presentes e seus bytes; classes de `Reference`;
+tamanho da fila do `Finalizer` e classes registradas para finalização (o hprof não guarda métodos, então elas vêm dos
+referents de `java.lang.ref.Finalizer`); `Cleaner`s. O tile **Não alcançável** do resumo inclui objetos que só são
+alcançáveis por weak/soft refs.
+
+### Memória off-heap (estimada)
+O dump não contém memória nativa; ela é estimada pelos objetos Java: capacidade de `DirectByteBuffer` (donos, views
+e mapeados), `PoolChunk` do Netty, e contagem de descritores, streams, sockets, `ZipFile`, `Inflater`/`Deflater`
+(com "abertos" quando a classe tem campo `closed`/`fd`).
+
 ## 6. Conceitos
 
 **Shallow size**: memória usada pelo próprio objeto (seus campos ou, num array, seus elementos).
@@ -234,6 +265,9 @@ Grupos de chaves: `cli.*` (uso e erros), `log.*` (progresso), `report.*`, `secti
 | `src/main/kotlin/Main.kt` | Lê os argumentos, carrega o idioma, roda a análise e grava os arquivos. |
 | `src/main/kotlin/Analyzer.kt` | Abre o dump com o Shark e monta o modelo de dados `HeapReport`. |
 | `src/main/kotlin/Dominators.kt` | Algoritmo da dominator tree. |
+| `src/main/kotlin/Waste.kt`, `References.kt`, `OffHeap.kt` | Coletores chamados na passada única; cada um vira uma seção. |
+| `src/main/kotlin/Health.kt` | Regras do painel de saúde (função pura sobre o `HeapReport`). |
+| `src/main/kotlin/Snapshot.kt` | Snapshot JSON com o histograma completo (`--format json`). |
 | `src/main/kotlin/Reports.kt` | Geração do Markdown e do HTML. |
 | `src/main/kotlin/I18n.kt` | Carrega os arquivos de idioma e formata as mensagens. |
 | `src/main/resources/report.html` | Template HTML: CSS e o JavaScript que desenha tabelas e gráficos. |
@@ -247,7 +281,8 @@ Etapas da análise:
 
 1. O Shark indexa o dump (todos os tipos de GC root são indexados, não só o subconjunto padrão do Shark).
 2. Uma única passada por todos os objetos monta o histograma de classes, a contagem de strings duplicadas, a lista de
-   class loaders e o grafo de referências. Referents de weak, soft e phantom references são ignorados, e toda instância
+   class loaders e o grafo de referências, e alimenta os coletores de desperdício, referências e off-heap (uma segunda
+   passada lê só o conteúdo dos primitive arrays). Referents de weak, soft e phantom references são ignorados, e toda instância
    também referencia a sua classe.
 3. Uma raiz virtual é ligada a todos os GC roots, e a dominator tree do grafo inteiro é calculada com o algoritmo
    **Semi-NCA** (semidominadores de Lengauer–Tarjan e ancestral comum mais próximo). Ele é iterativo e usa só arrays

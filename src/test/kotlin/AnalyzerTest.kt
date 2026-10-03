@@ -16,6 +16,9 @@ object Holder {
 
     /** JDK proxies, one throwaway ClassLoader each: the "uncached proxy" anti-pattern. */
     var proxies: List<Runnable> = emptyList()
+
+    /** Waste / references / off-heap fixtures. */
+    var waste: List<Any> = emptyList()
 }
 
 class AnalyzerTest {
@@ -95,6 +98,18 @@ class AnalyzerTest {
             val loader = object : ClassLoader(AnalyzerTest::class.java.classLoader) {}
             java.lang.reflect.Proxy.newProxyInstance(loader, arrayOf(Runnable::class.java)) { _, _, _ -> null } as Runnable
         }
+        val sameInts = IntArray(1024) { it }
+        @Suppress("DEPRECATION", "removal")
+        Holder.waste = listOf(
+            List(1000) { ArrayList<Any>(10) },                       // empty, array allocated
+            List(500) { HashMap<String, String>().apply { put("k", "v") } }, // one entry
+            List(100) { ByteArray(4096) },                            // zeroed
+            List(50) { sameInts.copyOf() },                           // duplicated content
+            List(10) { java.lang.Boolean(true) },                     // explicit new
+            java.nio.ByteBuffer.allocateDirect(1024 * 1024),
+            List(30) { java.lang.ref.SoftReference(Any()) },
+            List(40) { java.lang.ref.WeakReference(Any()) },
+        )
         val dump = File.createTempFile("self", ".hprof").also { it.delete() }
         try {
             ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean::class.java).dumpHeap(dump.path, true)
@@ -139,6 +154,27 @@ class AnalyzerTest {
             assertContains(fullMd, "grupo(s) suspeito(s)")
             assertContains(toHtml(report), "\"proxies\":{")
 
+            // waste / references / off-heap
+            val w = report.waste!!
+            val arrayList = w.collections.first { it.type == "java.util.ArrayList" }
+            assertTrue(arrayList.empty >= 1000, "empty ArrayLists: $arrayList")
+            assertTrue(w.sizes.first { it.label == "1" }.count >= 500, "size buckets: ${w.sizes}")
+            assertTrue(w.arrays.any { it.kind == "zero" && it.type == "byte[]" && it.count >= 100 }, "arrays: ${w.arrays}")
+            assertTrue(w.duplicateArrays.any { it.type == "int[]" && it.length == 1024 && it.count >= 50 }, "dups: ${w.duplicateArrays}")
+            assertTrue(w.boxing.first { it.type == "java.lang.Boolean" }.redundant >= 10, "boxing: ${w.boxing}")
+            assertTrue(w.overhead.header > 0 && w.overhead.data > 0)
+            assertTrue(w.strings.latin1 > 0)
+            assertTrue(report.offHeap!!.direct.ownerBytes >= 1024 * 1024, "direct: ${report.offHeap!!.direct}")
+            val kinds = report.references!!.kinds.associateBy { it.kind }
+            assertTrue(kinds["Soft"]!!.count >= 30 && kinds["Weak"]!!.count >= 40, "refs: $kinds")
+            val appOnly = report.appOnly()
+            assertTrue(appOnly.waste == null && appOnly.references == null && appOnly.offHeap == null && appOnly.health.isEmpty())
+            val snapshot = kotlinx.serialization.json.Json.decodeFromString<Snapshot>(toSnapshotJson(report))
+            assertTrue(snapshot.classes.size > report.classes.size, "snapshot keeps the full histogram")
+            listOf("## Painel de saúde", "## Desperdício de memória", "## Referências e finalização", "## Memória off-heap (estimada)")
+                .forEach { assertContains(toMarkdown(report), it) }
+            assertContains(toHtml(report), "\"waste\":{")
+
             // a failed section is flagged at the top of both reports
             val warned = report.copy(warnings = listOf("Aviso: \"Caminhos até GC roots\" falhou, seção omitida: boom"))
             assertContains(toMarkdown(warned), "## Avisos")
@@ -169,6 +205,36 @@ class AnalyzerTest {
             dump.delete()
             Holder.marker = null
             Holder.proxies = emptyList()
+            Holder.waste = emptyList()
         }
+    }
+
+    @Test
+    fun log2Buckets() {
+        assertEquals(listOf(0, 1, 2, 3, 3, 4, 4, 5), listOf(0L, 1, 2, 3, 4, 5, 8, 9).map(::log2Bucket))
+        assertEquals(listOf("0", "1", "2", "3-4", "5-8", "9-16"), (0..5).map(::log2Label))
+    }
+
+    @Test
+    fun healthRules() {
+        val summary = Summary("a.hprof", 0, "", 8, "", 0, 0, 0, 0, 0, 0, totalShallow = 1000, reachableCount = 1,
+            reachableBytes = 1000, analysisMillis = 0, toolVersion = "")
+        val ok = HeapReport(summary, emptyList(), emptyList(), emptyList(), null, emptyList(), emptyList(), emptyList(),
+            emptyList(), emptyList(), emptyList())
+        assertEquals(emptyList(), health(ok))
+
+        val sick = ok.copy(
+            retainedObjects = listOf(ObjectStat("0x1", "a.Big", 1, 400, null)),
+            references = RefReport(emptyList(), emptyList(), 20_000, emptyList(), emptyList()),
+            classLoaders = List(2) { LoaderStat("0x$it", "org.apache.catalina.loader.ParallelWebappClassLoader", 1, null) },
+            duplicateStrings = listOf(DupString("x", 3, 100, 200)),
+            waste = WasteReport(listOf(CollectionStat("java.util.ArrayList", 2000, 2000, 60, 10, 2000, 0)),
+                emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), Overhead(0, 0, 0),
+                StringStats(0, 0, 0, 0, emptyList(), emptyList())),
+        )
+        val keys = health(sick).map { it.severity to it.key }
+        assertEquals(listOf(CRITICAL to "bigDominator", CRITICAL to "finalizerQueue", WARNING to "lowFill",
+            WARNING to "webappLoaders", WARNING to "dupStrings", INFO to "emptyCollections"), keys)
+        assertEquals(listOf("40", "a.Big"), health(sick).first().args)
     }
 }

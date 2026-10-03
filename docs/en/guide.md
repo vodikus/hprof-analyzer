@@ -64,7 +64,7 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [options]
 | Option | Default | Description |
 | --- | --- | --- |
 | `--out <dir>` | `.` | Output directory. Created if missing. Files are named after the dump (`app.hprof` → `app.html`, `app.md`). |
-| `--format html,md` | `html,md` | Comma-separated list of formats. |
+| `--format html,md` | `html,md` | Comma-separated list of formats. `json` writes `<dump>.snapshot.json` with the full class histogram (the input for comparing dumps). |
 | `--top <n>` | `50` | Rows in each table (classes, objects, strings, arrays). |
 | `--no-retained` | off | Skip the dominator tree. About 2× faster and uses less memory, but retained sizes, the treemap and the "biggest objects" section are empty, and GC root paths are only computed for `--leak-class`. |
 | `--leak-class a.B,c.D` | — | Fully qualified class names. Up to 20 instances of these classes get a GC root path, in addition to the 10 biggest objects. |
@@ -160,6 +160,37 @@ Largest object and primitive arrays with their length, size and retained size.
 Every class loader instance with the number of classes it defined and its retained size. `<bootstrap>` stands for the
 JVM's built-in loader.
 
+### Health panel
+First section of the full report. Automatic rules with a severity (critical, warning, info) and a link to the section:
+one object retaining over 30% of the reachable heap, a Finalizer queue over 10,000, large collections with an average
+fill ratio under 25%, 2 or more webapp ClassLoaders (Tomcat/Jetty), duplicate strings over 10% of the heap, suspicious
+proxy groups, and empty collections with an allocated array over 5% of the heap. Thresholds live in `Health.kt`.
+
+### Memory waste
+- **Collections**: `ArrayList`, `Vector`, `HashMap`, `LinkedHashMap`, `WeakHashMap`, `Hashtable`, `ConcurrentHashMap`
+  and `ArrayDeque` (exact classes only; `HashSet` shows up as its inner `HashMap`). Per type: empty ones with an
+  allocated array, elements, capacity and bytes of free slots. Fill ratio and element count charts.
+- **Arrays**: all-zero primitive arrays (>= 64 B), all-null or >= 90% null object arrays, and primitive arrays with
+  identical content (>= 256 B, 64-bit hash; String backing arrays are skipped, they are in duplicate strings).
+- **Boxing**: `Integer`, `Long`, `Boolean`... instances. "Redundant" counts copies of a value the JVM caches
+  (-128..127, `true`/`false`): a sign of `new Integer(...)`.
+- **Fields almost always null**: classes with >= 1000 instances and reference fields >= 90% null (heatmap).
+- **Header and padding**: estimate for a 64-bit JVM with compressed class pointers (12 B header, 16 B for arrays,
+  8 B alignment), since the hprof has no header.
+- **Strings**: LATIN1 vs UTF16 (`coder` field; JDK 8 counts as UTF16), empty strings, length distribution and the most
+  common prefixes.
+
+### References and finalization
+Soft, weak, phantom and final references with the referents still set and their bytes; `Reference` classes; the
+`Finalizer` queue length and the classes registered for finalization (the hprof has no methods, so they come from the
+referents of `java.lang.ref.Finalizer`); `Cleaner`s. The **Unreachable** summary tile includes objects reachable only
+through weak/soft references.
+
+### Off-heap memory (estimated)
+A dump has no native memory; it is estimated from Java objects: `DirectByteBuffer` capacity (owners, views and mapped),
+Netty `PoolChunk`, and counts of file descriptors, streams, sockets, `ZipFile`, `Inflater`/`Deflater` (with "open" when
+the class has a `closed`/`fd` field).
+
 ## 6. Key concepts
 
 **Shallow size**: memory used by the object itself (its fields, or its elements for an array).
@@ -232,6 +263,9 @@ Key groups: `cli.*` (usage and errors), `log.*` (progress), `report.*`, `section
 | `src/main/kotlin/Main.kt` | Parses arguments, loads the language, runs the analysis, writes the files. |
 | `src/main/kotlin/Analyzer.kt` | Opens the dump with Shark and builds the `HeapReport` data model. |
 | `src/main/kotlin/Dominators.kt` | Dominator tree algorithm. |
+| `src/main/kotlin/Waste.kt`, `References.kt`, `OffHeap.kt` | Collectors called from the single pass; one report section each. |
+| `src/main/kotlin/Health.kt` | Health panel rules (a pure function over `HeapReport`). |
+| `src/main/kotlin/Snapshot.kt` | JSON snapshot with the full histogram (`--format json`). |
 | `src/main/kotlin/Reports.kt` | Markdown and HTML generation. |
 | `src/main/kotlin/I18n.kt` | Loads language files and formats messages. |
 | `src/main/resources/report.html` | HTML template: CSS and the JavaScript that renders tables and charts. |
@@ -245,7 +279,8 @@ Analysis pipeline:
 
 1. Shark indexes the dump (all GC root types are indexed, not only Shark's default subset).
 2. A single pass over every object builds the class histogram, the duplicate string counts, the class loader list and
-   the reference graph. Weak, soft and phantom referents are skipped, and every instance also references its class.
+   the reference graph, and feeds the waste, references and off-heap collectors (a second pass reads only primitive
+   array contents). Weak, soft and phantom referents are skipped, and every instance also references its class.
 3. A virtual root is linked to every GC root, and the dominator tree of the whole graph is computed with the
    **Semi-NCA** algorithm (Lengauer–Tarjan semidominators and nearest common ancestor). It is iterative and uses only
    `int` arrays, so it scales to tens of millions of objects. Shark 2.14 has a dominator tree of its own, but it is

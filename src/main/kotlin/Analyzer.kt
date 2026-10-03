@@ -56,8 +56,15 @@ data class HeapReport(
     val appScope: String? = null,
     /** Runtime-generated classes (proxies) per generator and base class; null if the section failed. */
     val proxies: ProxyReport? = null,
+    /** Memory waste: collections, arrays, boxing, null fields, header/padding, strings; null if the section failed. */
+    val waste: WasteReport? = null,
+    val references: RefReport? = null,
+    val offHeap: OffHeapReport? = null,
+    val health: List<HealthFinding> = emptyList(),
     /** Sections restricted to application classes; rendered as a separate report, not embedded. */
     @Transient val app: AppView? = null,
+    /** Every class (not only the top N); written to the snapshot only. */
+    @Transient val histogram: List<ClassStat> = emptyList(),
 )
 
 @Serializable
@@ -91,7 +98,8 @@ fun HeapReport.appOnly(): HeapReport {
     val a = app ?: error("no application view")
     return copy(classes = a.classes, packages = a.packages, retainedObjects = a.retainedObjects, dominatorTree = null,
         leaks = a.leaks, gcRoots = emptyList(), threads = a.threads, duplicateStrings = emptyList(),
-        largestArrays = a.largestArrays, classLoaders = emptyList(), proxies = a.proxies, appScope = a.scope, app = null)
+        largestArrays = a.largestArrays, classLoaders = emptyList(), proxies = a.proxies, appScope = a.scope, app = null,
+        waste = null, references = null, offHeap = null, health = emptyList())
 }
 
 @Serializable
@@ -178,7 +186,7 @@ class Options(
 
 // ponytail: sizes are what the hprof records hold (field/element bytes, no object header/alignment),
 // same convention as Shark. Add a JVM header model if absolute numbers must match MAT.
-private const val MAX_DEDUP_STRING = 1024
+internal const val MAX_DEDUP_STRING = 1024
 private const val MAX_STRING_SHOWN = 200
 private const val SUSPECTS = 10
 
@@ -193,7 +201,16 @@ private class IntList(cap: Int) {
 
 private class Acc(val name: String) { var count = 0L; var shallow = 0L; var retained = 0L }
 
-private class StrAcc(var count: Int, val bytes: Long)
+internal class StrAcc(var count: Int, val bytes: Long)
+
+/** Per-object hook of the main pass: the first exception disables it and is rethrown by [checkOk]. */
+internal abstract class Collector {
+    @PublishedApi internal var error: Exception? = null
+    protected inline fun safe(block: () -> Unit) {
+        if (error == null) try { block() } catch (e: Exception) { error = e }
+    }
+    protected fun checkOk() { error?.let { throw it } }
+}
 
 private fun hex(id: Long) = "0x" + java.lang.Long.toHexString(id)
 
@@ -204,7 +221,7 @@ private fun packageOf(className: String, msg: Messages): String {
     return if (dot < 0) "(default)" else base.substring(0, dot)
 }
 
-private fun <T> topN(n: Int, items: Sequence<T>, key: (T) -> Long): List<T> {
+internal fun <T> topN(n: Int, items: Sequence<T>, key: (T) -> Long): List<T> {
     val pq = PriorityQueue<T>(compareBy(key))
     for (item in items) {
         pq.add(item)
@@ -213,7 +230,7 @@ private fun <T> topN(n: Int, items: Sequence<T>, key: (T) -> Long): List<T> {
     return pq.sortedByDescending(key)
 }
 
-private fun HeapObject.className(): String = when (this) {
+internal fun HeapObject.className(): String = when (this) {
     is HeapClass -> "java.lang.Class"
     is HeapInstance -> instanceClassName
     is HeapObjectArray -> arrayClassName
@@ -222,7 +239,7 @@ private fun HeapObject.className(): String = when (this) {
 
 private fun HeapObject.label(): String = if (this is HeapClass) "class $name" else className()
 
-private fun HeapObject.shallowSize(): Long = when (this) {
+internal fun HeapObject.shallowSize(): Long = when (this) {
     is HeapClass -> recordSize.toLong()
     is HeapInstance -> byteSize.toLong()
     is HeapObjectArray -> byteSize.toLong()
@@ -232,7 +249,7 @@ private fun HeapObject.shallowSize(): Long = when (this) {
 // Shark 2.14 bug (HprofInMemoryIndex.indexedObjectOrNull): primitive arrays looked up by id get
 // objectIndex shifted by primitiveArrayCount - objectArrayCount, and findObjectByIndex fails for them.
 // Objects coming from the graph.objects/xxxArrays sequences are indexed correctly.
-private fun HeapGraph.indexOf(lookedUp: HeapObject) =
+internal fun HeapGraph.indexOf(lookedUp: HeapObject) =
     if (lookedUp is HeapPrimitiveArray) lookedUp.objectIndex - primitiveArrayCount + objectArrayCount
     else lookedUp.objectIndex
 
@@ -428,6 +445,9 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val classesPerLoader = HashMap<Long, Int>()
         val leakIds = LinkedHashSet<Long>()
         var totalShallow = 0L
+        val waste = WasteCollector(graph, n)
+        val refs = RefCollector(graph)
+        val offHeap = OffHeapCollector()
 
         fun addEdge(from: Int, toId: Long) {
             val target = graph.findObjectByIdOrNull(toId) ?: return
@@ -461,7 +481,8 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                 }
                 is HeapInstance -> {
                     addEdge(idx, obj.instanceClassId) // an instance keeps its class alive
-                    for (f in obj.readFields()) {
+                    val fields = obj.readFields().toList()
+                    for (f in fields) {
                         if (!f.value.isNonNullReference) continue
                         // weak/soft/phantom referents do not retain memory
                         if (f.name == "referent" && f.declaringClass.name == "java.lang.ref.Reference") continue
@@ -469,20 +490,30 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                     }
                     if (name == "java.lang.String") {
                         val value = obj.readAsJavaString()
+                        val valueArray = fields.named("value")?.asObject as? HeapPrimitiveArray
                         if (value != null && value.length <= MAX_DEDUP_STRING) {
-                            val arrayBytes = obj["java.lang.String", "value"]?.valueAsPrimitiveArray?.byteSize ?: 0
-                            strings.getOrPut(value) { StrAcc(0, size + arrayBytes) }.count++
+                            strings.getOrPut(value) { StrAcc(0, size + (valueArray?.byteSize ?: 0)) }.count++
                         }
+                        waste.string(fields, value, valueArray)
                     }
+                    waste.instance(obj, name, fields, size)
+                    refs.instance(obj, name, fields)
+                    offHeap.instance(name, fields)
                     if (isLoaderClass.getOrPut(obj.instanceClassId) { obj instanceOf "java.lang.ClassLoader" }) {
                         loaderIds.add(obj.objectId)
                     }
                     if (name in opt.leakClasses && leakIds.size < SUSPECTS * 2) leakIds.add(obj.objectId)
                 }
                 is HeapObjectArray -> {
-                    for (e in obj.readElements()) if (e.isNonNullReference) addEdge(idx, e.asNonNullObjectId!!)
+                    var length = 0
+                    var nulls = 0
+                    for (e in obj.readElements()) {
+                        length++
+                        if (e.isNonNullReference) addEdge(idx, e.asNonNullObjectId!!) else nulls++
+                    }
+                    waste.objectArray(name, size, length, nulls)
                 }
-                is HeapPrimitiveArray -> Unit
+                is HeapPrimitiveArray -> waste.primitiveArray(size)
             }
             if (++seen % 1_000_000 == 0) opt.log(opt.msg["log.progress", seen, n])
         }
@@ -601,6 +632,12 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             }.sortedByDescending { it.classesLoaded }
         }
 
+        // ---- waste / references / off-heap (collected in the main pass) ----
+        opt.log(opt.msg["log.waste"])
+        val wasteReport = guard("section.waste", null) { waste.result(top, strings) }
+        val refReport = guard("section.references", null) { refs.result(top) }
+        val offHeapReport = guard("section.offHeap", null) { offHeap.result() }
+
         val summary = Summary(
             file = file.name,
             fileSize = file.length(),
@@ -656,9 +693,12 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             threads = threads.filter { t -> t.frames.any { isApp(it.text.substringBefore('(').substringBeforeLast('.')) } },
             proxies = proxyReport(::isApp),
         )
-        return HeapReport(summary, classStats(classAccs), packageStats(classAccs), retainedObjects, tree, leaks, gcRoots,
+        val report = HeapReport(summary, classStats(classAccs), packageStats(classAccs), retainedObjects, tree, leaks, gcRoots,
             threads, duplicateStrings, arrays, classLoaders, warnings, jvm, vmArgs, frameworks,
-            proxies = proxyReport { true }, app = app)
+            proxies = proxyReport { true }, waste = wasteReport, references = refReport, offHeap = offHeapReport, app = app,
+            histogram = classAccs.sortedByDescending { it.shallow }
+                .map { ClassStat(it.name, it.count, it.shallow, if (opt.retained) it.retained else null) })
+        return report.copy(health = guard("section.health", emptyList()) { health(report) })
     }
 }
 

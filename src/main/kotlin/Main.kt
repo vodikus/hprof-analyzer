@@ -44,7 +44,7 @@ fun main(args: Array<String>) {
     }
     val file = input ?: fail(msg["cli.noInput"])
     if (!file.isFile) fail(msg["cli.fileNotFound", file])
-    val unknown = formats - setOf("html", "md")
+    val unknown = formats - setOf("html", "md", "json")
     if (unknown.isNotEmpty()) fail(msg["cli.unknownFormat", unknown])
 
     System.err.println(NAME_VERSION)
@@ -53,6 +53,7 @@ fun main(args: Array<String>) {
     fun write(r: HeapReport, base: String) {
         if ("md" in formats) File(out, "$base.md").also { f -> f.writeText(toMarkdown(r, msg)); println(f.path) }
         if ("html" in formats) File(out, "$base.html").also { f -> f.writeText(toHtml(r, msg)); println(f.path) }
+        if ("json" in formats && r.appScope == null) File(out, "$base.snapshot.json").also { f -> f.writeText(toSnapshotJson(r)); println(f.path) }
     }
     write(report, file.nameWithoutExtension)
     if (report.app?.classes?.isNotEmpty() == true) write(report.appOnly(), file.nameWithoutExtension + "-app")

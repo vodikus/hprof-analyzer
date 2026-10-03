@@ -45,6 +45,15 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         r.warnings.forEach { appendLine("- ⚠️ ${md(it)}") }
         appendLine()
     }
+    if (r.appScope == null) {
+        section("section.health")
+        if (r.health.isEmpty()) appendLine("✅ ${msg["health.ok"]}\n")
+        r.health.forEach { h ->
+            val icon = when (h.severity) { CRITICAL -> "🔴"; WARNING -> "🟠"; else -> "🔵" }
+            appendLine("- $icon **${msg["health.${h.severity}"]}**: ${md(msg.get("health.${h.key}", *h.args.toTypedArray()))}")
+        }
+        appendLine()
+    }
     section("section.summary")
     table(listOf("summary.metric", "summary.value"), listOf(
         listOf(msg["summary.file"], "${s.file} (${b(s.fileSize)})"),
@@ -60,6 +69,7 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         listOf(msg["summary.totalShallow"], b(s.totalShallow)),
         listOf(msg["summary.reachable"], n(s.reachableCount)),
         listOf(msg["summary.reachableBytes"], b(s.reachableBytes)),
+        listOf(msg["summary.unreachable"], b(s.reachableBytes?.let { s.totalShallow - it })),
         listOf(msg["summary.analysisTime"], "${n(s.analysisMillis)} ms"),
     ))
     appendLine("> ${msg["note.sizes"]}\n")
@@ -160,6 +170,73 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         section("section.loaders")
         table(listOf("col.id", "col.class", "col.classesLoaded", "col.retained"),
             r.classLoaders.map { listOf(it.id, it.className, n(it.classesLoaded), b(it.retained)) })
+    }
+
+    fun sub(key: String) = appendLine("### ${msg[key]}\n")
+    r.waste?.let { w ->
+        section("section.waste")
+        appendLine("> ${msg["note.waste"]}\n")
+        sub("waste.collections")
+        table(listOf("col.type", "col.count", "col.empty", "col.emptyBytes", "col.size", "col.capacity", "col.unused"),
+            w.collections.map { listOf(it.type, n(it.count), n(it.empty), b(it.emptyBytes), n(it.size), n(it.capacity), b(it.unusedBytes)) })
+        sub("waste.fill")
+        table(listOf("col.size", "col.count"), w.fillRatio.map { listOf(it.label, n(it.count)) })
+        sub("waste.sizes")
+        table(listOf("col.size", "col.count"), w.sizes.map { listOf(it.label, n(it.count)) })
+        sub("waste.arrays")
+        table(listOf("col.kind", "col.type", "col.count", "col.bytes"),
+            w.arrays.map { listOf(msg["waste.kind.${it.kind}"], it.type, n(it.count), b(it.bytes)) })
+        sub("waste.dupArrays")
+        table(listOf("col.type", "col.length", "col.copies", "col.bytesEach", "col.wasted"),
+            w.duplicateArrays.map { listOf(it.type, n(it.length), n(it.count), b(it.bytesEach), b(it.wasted)) })
+        sub("waste.boxing")
+        appendLine("${msg["note.boxing"]}\n")
+        table(listOf("col.type", "col.instances", "col.bytes", "col.redundant"),
+            w.boxing.map { listOf(it.type, n(it.count), b(it.bytes), n(it.redundant)) })
+        sub("waste.nullFields")
+        table(listOf("col.class", "col.instances", "col.field", "col.nullPct"),
+            w.nullFields.flatMap { c -> c.fields.filter { it.nullPct >= 90 }.map { f ->
+                listOf(c.className, n(c.instances), f.name, String.format(msg.locale, "%.1f%%", f.nullPct)) } })
+        sub("waste.overhead")
+        val o = w.overhead
+        table(listOf("summary.metric", "col.bytes"), listOf(
+            listOf(msg["overhead.data"], b(o.data)), listOf(msg["overhead.header"], b(o.header)), listOf(msg["overhead.padding"], b(o.padding))))
+        sub("waste.strings")
+        val st = w.strings
+        table(listOf("summary.metric", "col.count"), listOf(
+            listOf(msg["strings.latin1"], n(st.latin1)), listOf(msg["strings.utf16"], n(st.utf16)),
+            listOf(msg["strings.empty"], n(st.empty)), listOf(msg["strings.long"], n(st.longStrings))))
+        sub("waste.prefixes")
+        table(listOf("col.prefix", "col.count", "col.bytes"), st.prefixes.map { listOf("\"${it.prefix}\"", n(it.count), b(it.bytes)) })
+    }
+
+    r.references?.let { rf ->
+        section("section.references")
+        appendLine("> ${msg["note.references"]}\n")
+        table(listOf("col.type", "col.count", "col.withReferent", "col.referentBytes"),
+            rf.kinds.map { listOf(it.kind, n(it.count), n(it.withReferent), b(it.referentBytes)) })
+        appendLine("**${msg["refs.finalizerQueue"]}:** ${rf.finalizerQueue?.let(::n) ?: msg["misc.unknown"]}\n")
+        sub("refs.byClass")
+        table(listOf("col.class", "col.count"), rf.byClass.map { listOf(it.name, n(it.count)) })
+        sub("refs.finalizer")
+        table(listOf("col.class", "col.count"), rf.finalizable.map { listOf(it.name, n(it.count)) })
+        if (rf.cleaners.isNotEmpty()) {
+            sub("refs.cleaners")
+            table(listOf("col.class", "col.count"), rf.cleaners.map { listOf(it.name, n(it.count)) })
+        }
+    }
+
+    r.offHeap?.let { oh ->
+        section("section.offHeap")
+        appendLine("> ${msg["note.offHeap"]}\n")
+        val d = oh.direct
+        table(listOf("col.type", "col.count", "col.bytes"), listOf(
+            listOf(msg["offheap.owners"], n(d.owners), b(d.ownerBytes)),
+            listOf(msg["offheap.views"], n(d.views), b(d.viewBytes)),
+            listOf(msg["offheap.mapped"], n(d.mapped), b(d.mappedBytes))))
+        oh.netty?.let { appendLine(msg["offheap.netty", n(it.chunks), b(it.allocated), b(it.used)] + "\n") }
+        sub("offheap.resources")
+        table(listOf("col.class", "col.count", "col.open"), oh.resources.map { listOf(it.className, n(it.count), n(it.open)) })
     }
 
     appendLine("---\n\n_${msg["report.generatedBy", s.toolVersion]}_")

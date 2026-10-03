@@ -10,7 +10,7 @@
   --page: #f9f9f7; --surface: #fcfcfb; --text: #0b0b0b; --text-2: #52514e; --muted: #898781;
   --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --series-1: #2a78d6; --seq-2: #86b6ef; --seq-3: #3987e5; --seq-4: #1c5cab;
-  --good: #0ca30c; --critical: #d03b3b; --neutral: #898781;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; --neutral: #898781;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -63,6 +63,13 @@ footer.note { margin-top: 48px; }
 .warn ul { margin: 0; padding-left: 20px; }
 .warn li { overflow-wrap: anywhere; }
 .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--axis); color: var(--text); }
+.health { list-style: none; margin: 0; padding: 0; }
+.health li { padding: 6px 0; border-bottom: 1px solid var(--grid); overflow-wrap: anywhere; }
+.health li:last-child { border-bottom: 0; }
+.health a { color: var(--text); text-decoration: none; display: flex; gap: 8px; align-items: baseline; }
+.health a:hover .msg { text-decoration: underline; }
+.sev { flex: none; font-weight: 600; font-size: 12px; white-space: nowrap; }
+.sev::before { content: var(--icon); color: var(--c); margin-right: 4px; }
 .scope { border-left: 4px solid var(--series-1); padding: 8px 12px; background: var(--surface); border-radius: 6px; overflow-wrap: anywhere; }
 @media (max-width: 900px) {
   nav { position: static; width: auto; border-right: 0; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; }
@@ -157,14 +164,15 @@ const DATA = /*DATA*/;
     backgroundColor: css('--surface'), borderColor: css('--border'), textStyle: { color: css('--text') }, confine: true,
   }, extra);
 
-  // Horizontal bar, single series (so no legend); items largest first.
-  function hbar(items, fmt) {
+  // Horizontal bar, single series (so no legend); items largest first. extra(item) adds a tooltip line.
+  function hbar(items, fmt, extra) {
     const data = [...items].reverse();
     return {
       textStyle: baseText(),
       grid: { left: 12, right: 32, top: 12, bottom: 24, containLabel: true },
       tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
-        formatter: ps => `${esc(data[ps[0].dataIndex].name)}<br><b>${fmt(ps[0].value)}</b>` }),
+        formatter: ps => { const d = data[ps[0].dataIndex];
+          return `${esc(d.name)}<br><b>${fmt(ps[0].value)}</b>` + (extra ? '<br>' + esc(extra(d)) : ''); } }),
       xAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: fmt }, splitLine: { lineStyle: { color: css('--grid') } } },
       yAxis: { type: 'category', data: data.map(d => short(d.name)), axisLabel: { color: css('--text-2') },
                axisLine: { lineStyle: { color: css('--axis') } }, axisTick: { show: false } },
@@ -172,6 +180,54 @@ const DATA = /*DATA*/;
     };
   }
   const barHeight = n => Math.max(160, n * 24 + 50);
+
+  // Vertical bars of a distribution, buckets kept in their order; single series.
+  function vbar(items, fmt) {
+    return {
+      textStyle: baseText(),
+      grid: { left: 12, right: 24, top: 16, bottom: 24, containLabel: true },
+      tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
+        formatter: ps => `${esc(items[ps[0].dataIndex].name)}<br><b>${fmt(ps[0].value)}</b>` }),
+      xAxis: { type: 'category', data: items.map(d => d.name), axisLabel: { color: css('--text-2') },
+               axisLine: { lineStyle: { color: css('--axis') } }, axisTick: { show: false } },
+      yAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: fmt }, splitLine: { lineStyle: { color: css('--grid') } } },
+      series: [{ type: 'bar', data: items.map(d => d.value), barMaxWidth: 32, itemStyle: { color: css('--series-1'), borderRadius: [4, 4, 0, 0] } }],
+    };
+  }
+
+  // One horizontal bar split into the parts of a whole; legend + per-part tooltip.
+  const PART_COLORS = ['--series-1', '--seq-4', '--neutral'];
+  function parts(items, fmt) {
+    const total = items.reduce((a, p) => a + p.value, 0) || 1;
+    return {
+      textStyle: baseText(),
+      legend: { top: 0, left: 0, textStyle: { color: css('--text-2') }, data: items.map(p => p.name) },
+      grid: { left: 12, right: 24, top: 36, bottom: 8, containLabel: true },
+      tooltip: tooltip({ trigger: 'item', formatter: p => `${esc(p.seriesName)}<br><b>${fmt(p.value)}</b> (${(100 * p.value / total).toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%)` }),
+      xAxis: { type: 'value', max: total, show: false },
+      yAxis: { type: 'category', data: [''], show: false },
+      series: items.map((p, i) => ({
+        type: 'bar', stack: 'all', name: p.name, data: [p.value], barWidth: 28,
+        itemStyle: { color: css(PART_COLORS[i % PART_COLORS.length]), borderColor: css('--surface'), borderWidth: 2 },
+      })),
+    };
+  }
+
+  // Heatmap rows x columns, value 0..100 (sequential, one hue).
+  function heatmap(rows, cols, cells, fmt) {
+    return {
+      textStyle: baseText(),
+      grid: { left: 12, right: 24, top: 12, bottom: 56, containLabel: true },
+      tooltip: tooltip({ formatter: p => `${esc(rows[p.value[1]])}<br>${esc(cols[p.value[0]])}: <b>${fmt(p.value[2])}</b>` }),
+      xAxis: { type: 'category', data: cols, axisLabel: { color: css('--text-2'), rotate: 45 }, axisTick: { show: false } },
+      yAxis: { type: 'category', data: rows.map(short), axisLabel: { color: css('--text-2') }, axisTick: { show: false } },
+      visualMap: { min: 0, max: 100, calculable: false, text: [fmt(100), fmt(0)], orient: 'horizontal', left: 'center', bottom: 0, itemHeight: 120,
+        textStyle: { color: css('--text-2') }, inRange: { color: [css('--grid'), css('--seq-2'), css('--seq-4')] } },
+      series: [{ type: 'heatmap', data: cells, itemStyle: { borderColor: css('--surface'), borderWidth: 2 } }],
+    };
+  }
+  const pct = v => v.toLocaleString(LOCALE, { maximumFractionDigits: 1 }) + '%';
+  const tile = (k, v) => el('div', { class: 'tile' }, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v }));
 
   const s = DATA.summary;
   const hasRetained = s.reachableBytes != null;
@@ -186,12 +242,22 @@ const DATA = /*DATA*/;
     section('warnings', '⚠ ' + t('section.warnings'), t('note.warnings')).append(
       el('div', { class: 'card warn' }, el('ul', null, ...DATA.warnings.map(w => el('li', { text: w })))));
   }
+  if (full) {
+    const SEV = { critical: ['--critical', '"✖"'], warning: ['--warning', '"▲"'], info: ['--series-1', '"●"'] };
+    const hs = DATA.health || [];
+    section('health', t('section.health'), t('note.health')).append(el('div', { class: 'card' }, hs.length
+      ? el('ul', { class: 'health' }, ...hs.map(h => el('li', null, el('a', { href: '#' + h.anchor },
+          el('span', { class: 'sev', style: `--c:var(${SEV[h.severity][0]});--icon:${SEV[h.severity][1]}`, text: t('health.' + h.severity) }),
+          el('span', { class: 'msg', text: t('health.' + h.key, ...h.args) })))))
+      : el('p', { class: 'muted', text: '✓ ' + t('health.ok') })));
+  }
   const sum = section('summary', t('section.summary'), t('note.sizes'));
   const tiles = [
     ['summary.file', bytes(s.fileSize)], ['summary.objects', num(s.objectCount)], ['summary.classes', num(s.classCount)],
     ['summary.instances', num(s.instanceCount)], ['summary.objectArrays', num(s.objectArrayCount)], ['summary.primitiveArrays', num(s.primitiveArrayCount)],
     ['summary.gcRoots', num(s.gcRootCount)], ['summary.totalShallow', bytes(s.totalShallow)],
     ['summary.reachable', num(s.reachableCount)], ['summary.reachableBytes', bytes(s.reachableBytes)],
+    ['summary.unreachable', hasRetained ? bytes(s.totalShallow - s.reachableBytes) : '-'],
   ];
   sum.append(el('div', { class: 'tiles' }, ...tiles.map(([k, v]) => el('div', { class: 'tile' }, el('div', { class: 'k', text: t(k) }), el('div', { class: 'v', text: v })))));
 
@@ -244,10 +310,18 @@ const DATA = /*DATA*/;
   const metrics = [['retained', t('col.retained'), bytes], ['shallow', t('col.shallow'), bytes], ['count', t('col.instances'), num]]
     .filter(m => hasRetained || m[0] !== 'retained');
   const metricSel = el('select', { 'aria-label': t('chart.metric') }, ...metrics.map(([k, l]) => el('option', { value: k, text: l })));
-  hist.append(el('div', { class: 'toolbar' }, t('chart.topClassesBy'), metricSel));
+  const cumulative = el('span', { class: 'muted' });
+  hist.append(el('div', { class: 'toolbar' }, t('chart.topClassesBy'), metricSel, cumulative));
+  // Pareto without a second axis: running share of the whole heap in the tooltip and the toolbar
+  const wholeOf = { retained: s.reachableBytes, shallow: s.totalShallow, count: s.objectCount };
   const classChart = chart(hist, () => {
     const [k, , fmt] = metrics.find(m => m[0] === metricSel.value);
-    return hbar([...DATA.classes].sort((a, b) => b[k] - a[k]).slice(0, 20).map(c => ({ name: c.name, value: c[k] })), fmt);
+    const whole = wholeOf[k] || 1;
+    let run = 0;
+    const items = [...DATA.classes].sort((a, b) => b[k] - a[k]).slice(0, 20)
+      .map(c => ({ name: c.name, value: c[k], cum: 100 * (run += c[k]) / whole }));
+    cumulative.textContent = items.length ? '· ' + t('chart.cumulative', items.length, pct(items[items.length - 1].cum)) : '';
+    return hbar(items, fmt, d => t('chart.cumulative', items.indexOf(d) + 1, pct(d.cum)));
   }, barHeight(20));
   metricSel.onchange = () => draw(classChart);
   hist.append(table([
@@ -386,6 +460,137 @@ const DATA = /*DATA*/;
     { h: t('col.classesLoaded'), v: r => r.classesLoaded, f: num, num: true },
     { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
   ], DATA.classLoaders));
+
+  // ---- Desperdício ----
+  const w = DATA.waste;
+  if (w) {
+    const ws = section('waste', t('section.waste'), t('note.waste'));
+    const sub = key => ws.append(el('h3', { text: t(key) }));
+    sub('waste.collections');
+    const colls = (w.collections || []).filter(c => c.unusedBytes > 0);
+    if (colls.length) chart(ws, () => hbar(colls.map(c => ({ name: c.type, value: c.unusedBytes })), bytes), barHeight(colls.length));
+    ws.append(table([
+      { h: t('col.type'), v: r => r.type, mono: true },
+      { h: t('col.count'), v: r => r.count, f: num, num: true },
+      { h: t('col.empty'), v: r => r.empty, f: num, num: true },
+      { h: t('col.emptyBytes'), v: r => r.emptyBytes, f: bytes, num: true },
+      { h: t('col.size'), v: r => r.size, f: num, num: true },
+      { h: t('col.capacity'), v: r => r.capacity, f: num, num: true },
+      { h: t('col.unused'), v: r => r.unusedBytes, f: bytes, num: true },
+    ], w.collections || []));
+    sub('waste.fill');
+    chart(ws, () => vbar(w.fillRatio.map(b => ({ name: b.label, value: b.count })), num), 260);
+    sub('waste.sizes');
+    chart(ws, () => vbar(w.sizes.map(b => ({ name: b.label, value: b.count })), num), 260);
+
+    sub('waste.arrays');
+    ws.append(table([
+      { h: t('col.kind'), v: r => t('waste.kind.' + r.kind) },
+      { h: t('col.type'), v: r => r.type, mono: true },
+      { h: t('col.count'), v: r => r.count, f: num, num: true },
+      { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
+    ], w.arrays || []));
+    sub('waste.dupArrays');
+    const dups = (w.duplicateArrays || []).slice(0, 20);
+    if (dups.length) chart(ws, () => hbar(dups.map(d => ({ name: `${d.type} × ${num(d.count)} (${num(d.length)})`, value: d.wasted })), bytes), barHeight(dups.length));
+    ws.append(table([
+      { h: t('col.type'), v: r => r.type, mono: true },
+      { h: t('col.length'), v: r => r.length, f: num, num: true },
+      { h: t('col.copies'), v: r => r.count, f: num, num: true },
+      { h: t('col.bytesEach'), v: r => r.bytesEach, f: bytes, num: true },
+      { h: t('col.wasted'), v: r => r.wasted, f: bytes, num: true },
+    ], w.duplicateArrays || []));
+
+    sub('waste.boxing');
+    ws.append(el('p', { class: 'note', text: t('note.boxing') }));
+    const box = w.boxing || [];
+    if (box.length) chart(ws, () => hbar(box.map(b => ({ name: b.type, value: b.bytes, redundant: b.redundant })), bytes,
+      d => t('col.redundant') + ': ' + num(d.redundant)), barHeight(box.length));
+    ws.append(table([
+      { h: t('col.type'), v: r => r.type, mono: true },
+      { h: t('col.instances'), v: r => r.count, f: num, num: true },
+      { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
+      { h: t('col.redundant'), v: r => r.redundant, f: num, num: true },
+    ], box));
+
+    sub('waste.nullFields');
+    const nf = w.nullFields || [];
+    if (nf.length) {
+      const rows = nf.map(c => `${c.className} (${num(c.instances)})`);
+      const cols = [...new Set(nf.flatMap(c => c.fields.map(f => f.name)))];
+      const cells = nf.flatMap((c, y) => c.fields.map(f => [cols.indexOf(f.name), y, Math.round(f.nullPct * 10) / 10]));
+      chart(ws, () => heatmap(rows, cols, cells, pct), Math.max(220, rows.length * 28 + 140));
+    }
+    ws.append(table([
+      { h: t('col.class'), v: r => r.c, mono: true },
+      { h: t('col.instances'), v: r => r.n, f: num, num: true },
+      { h: t('col.field'), v: r => r.f, mono: true },
+      { h: t('col.nullPct'), v: r => r.p, f: pct, num: true },
+    ], nf.flatMap(c => c.fields.filter(f => f.nullPct >= 90).map(f => ({ c: c.className, n: c.instances, f: f.name, p: f.nullPct })))));
+
+    sub('waste.overhead');
+    const o = w.overhead;
+    chart(ws, () => parts([
+      { name: t('overhead.data'), value: o.data }, { name: t('overhead.header'), value: o.header }, { name: t('overhead.padding'), value: o.padding },
+    ], bytes), 110);
+
+    sub('waste.strings');
+    const st = w.strings;
+    const strTotal = st.latin1 + st.utf16 || 1;
+    ws.append(el('div', { class: 'tiles' },
+      tile(t('strings.latin1'), `${num(st.latin1)} (${pct(100 * st.latin1 / strTotal)})`),
+      tile(t('strings.utf16'), `${num(st.utf16)} (${pct(100 * st.utf16 / strTotal)})`),
+      tile(t('strings.empty'), num(st.empty)), tile(t('strings.long'), num(st.longStrings))));
+    chart(ws, () => vbar(st.lengths.map(b => ({ name: b.label, value: b.count })), num), 260);
+    ws.append(el('h3', { text: t('waste.prefixes') }), table([
+      { h: t('col.prefix'), v: r => r.prefix, f: v => JSON.stringify(v), mono: true },
+      { h: t('col.count'), v: r => r.count, f: num, num: true },
+      { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
+    ], st.prefixes || []));
+  }
+
+  // ---- Referências e finalização ----
+  const rf = DATA.references;
+  if (rf) {
+    const rs = section('references', t('section.references'), t('note.references'));
+    rs.append(el('div', { class: 'tiles' },
+      tile(t('refs.finalizerQueue'), rf.finalizerQueue == null ? t('misc.unknown') : num(rf.finalizerQueue)),
+      ...rf.kinds.map(k => tile(k.kind, num(k.count)))));
+    if (rf.kinds.length) chart(rs, () => hbar(rf.kinds.map(k => ({ name: k.kind, value: k.referentBytes })), bytes), barHeight(rf.kinds.length));
+    rs.append(table([
+      { h: t('col.type'), v: r => r.kind },
+      { h: t('col.count'), v: r => r.count, f: num, num: true },
+      { h: t('col.withReferent'), v: r => r.withReferent, f: num, num: true },
+      { h: t('col.referentBytes'), v: r => r.referentBytes, f: bytes, num: true },
+    ], rf.kinds));
+    const counts = list => table([{ h: t('col.class'), v: r => r.name, mono: true }, { h: t('col.count'), v: r => r.count, f: num, num: true }], list || []);
+    rs.append(el('h3', { text: t('refs.byClass') }), counts(rf.byClass));
+    rs.append(el('h3', { text: t('refs.finalizer') }), counts(rf.finalizable));
+    if (rf.cleaners?.length) rs.append(el('h3', { text: t('refs.cleaners') }), counts(rf.cleaners));
+  }
+
+  // ---- Off-heap ----
+  const oh = DATA.offHeap;
+  if (oh) {
+    const os = section('offheap', t('section.offHeap'), t('note.offHeap'));
+    const d = oh.direct;
+    os.append(el('div', { class: 'tiles' },
+      tile(t('offheap.owners'), `${bytes(d.ownerBytes)} (${num(d.owners)})`),
+      tile(t('offheap.views'), `${bytes(d.viewBytes)} (${num(d.views)})`),
+      tile(t('offheap.mapped'), `${bytes(d.mappedBytes)} (${num(d.mapped)})`)));
+    if (oh.netty) os.append(el('p', { text: t('offheap.netty', num(oh.netty.chunks), bytes(oh.netty.allocated), bytes(oh.netty.used)) }));
+    os.append(el('h3', { text: t('offheap.heapVsOff') }));
+    chart(os, () => parts([
+      { name: t('offheap.heap'), value: s.reachableBytes ?? s.totalShallow },
+      { name: t('offheap.direct'), value: d.ownerBytes },
+      { name: t('offheap.mapped'), value: d.mappedBytes },
+    ], bytes), 110);
+    os.append(el('h3', { text: t('offheap.resources') }), table([
+      { h: t('col.class'), v: r => r.className, mono: true },
+      { h: t('col.count'), v: r => r.count, f: num, num: true },
+      { h: t('col.open'), v: r => r.open, f: num, num: true },
+    ], oh.resources || []));
+  }
 
   main.append(el('footer', { class: 'note', text: t('report.generatedBy', s.toolVersion) }));
   nav.querySelector('.brand').textContent = 'hprof-analyzer ' + s.toolVersion;
