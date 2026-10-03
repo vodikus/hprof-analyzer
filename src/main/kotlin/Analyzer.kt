@@ -2,10 +2,6 @@ package hprof
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
-import shark.GcRoot
-import shark.HeapAnalysisFailure
-import shark.HeapAnalysisSuccess
-import shark.HeapAnalyzer
 import shark.HeapGraph
 import shark.HeapObject
 import shark.HeapObject.HeapClass
@@ -15,18 +11,6 @@ import shark.HeapObject.HeapPrimitiveArray
 import shark.HprofHeader
 import shark.HprofHeapGraph.Companion.openHeapGraph
 import shark.HprofRecordTag
-import shark.HprofRecord.LoadClassRecord
-import shark.HprofRecord.StackFrameRecord
-import shark.HprofRecord.StackTraceRecord
-import shark.HprofRecord.StringRecord
-import shark.IgnoredReferenceMatcher
-import shark.LeakTraceReference.ReferenceType
-import shark.LeakingObjectFinder
-import shark.ObjectInspectors
-import shark.OnAnalysisProgressListener
-import shark.ReferencePattern.InstanceFieldPattern
-import shark.StreamingHprofReader
-import shark.StreamingRecordReaderAdapter.Companion.asStreamingRecordReader
 import java.io.File
 import java.time.Instant
 import java.util.EnumSet
@@ -61,6 +45,12 @@ data class HeapReport(
     val references: RefReport? = null,
     val offHeap: OffHeapReport? = null,
     val health: List<HealthFinding> = emptyList(),
+    /** Leaking objects found by JVM rules, grouped by leak signature (Shark). */
+    val leakSuspects: LeakReport? = null,
+    /** Shortest paths to the instances of the biggest classes, merged by class (Sankey). */
+    val mergedPaths: List<MergedPaths> = emptyList(),
+    val retainedViews: RetainedReport? = null,
+    val concurrency: ConcurrencyReport? = null,
     /** Sections restricted to application classes; rendered as a separate report, not embedded. */
     @Transient val app: AppView? = null,
     /** Every class (not only the top N); written to the snapshot only. */
@@ -99,7 +89,8 @@ fun HeapReport.appOnly(): HeapReport {
     return copy(classes = a.classes, packages = a.packages, retainedObjects = a.retainedObjects, dominatorTree = null,
         leaks = a.leaks, gcRoots = emptyList(), threads = a.threads, duplicateStrings = emptyList(),
         largestArrays = a.largestArrays, classLoaders = emptyList(), proxies = a.proxies, appScope = a.scope, app = null,
-        waste = null, references = null, offHeap = null, health = emptyList())
+        waste = null, references = null, offHeap = null, health = emptyList(), leakSuspects = null, mergedPaths = emptyList(),
+        retainedViews = null, concurrency = null)
 }
 
 @Serializable
@@ -160,6 +151,15 @@ data class ThreadInfo(
     val priority: Int?,
     val retained: Long?,
     val frames: List<Frame>,
+    /** Thread.State from threadStatus. */
+    val state: String? = null,
+    /** Retained size of the objects held as locals in the stack frames (JavaFrame GC roots). */
+    val localsRetained: Long? = null,
+    /** Retained size of the thread's ThreadLocalMap. */
+    val threadLocalsRetained: Long? = null,
+    val threadLocals: Int? = null,
+    /** Entries whose ThreadLocal key was collected but the value is still held. */
+    val staleThreadLocals: Int? = null,
 )
 
 @Serializable
@@ -189,6 +189,7 @@ class Options(
 internal const val MAX_DEDUP_STRING = 1024
 private const val MAX_STRING_SHOWN = 200
 private const val SUSPECTS = 10
+private const val MERGED_CLASSES = 5
 
 private class IntList(cap: Int) {
     var data = IntArray(maxOf(cap, 16))
@@ -203,6 +204,20 @@ private class Acc(val name: String) { var count = 0L; var shallow = 0L; var reta
 
 internal class StrAcc(var count: Int, val bytes: Long)
 
+/** Index arrays built by the main pass; index [n] is the virtual GC root. [dom]/[retained] are null with --no-retained. */
+internal class Heap(
+    val graph: HeapGraph, val n: Int, val ids: LongArray, val clsOf: IntArray, val classNames: List<String>,
+    val loaderOf: IntArray, val dom: Dominators?, val retained: LongArray?,
+) {
+    private val classLabels = HashMap<Int, String>()
+
+    /** Class name of the object; "class X" for class objects. */
+    fun label(idx: Int): String {
+        val name = classNames[clsOf[idx]]
+        return if (name != "java.lang.Class") name else classLabels.getOrPut(idx) { graph.findObjectById(ids[idx]).label() }
+    }
+}
+
 /** Per-object hook of the main pass: the first exception disables it and is rethrown by [checkOk]. */
 internal abstract class Collector {
     @PublishedApi internal var error: Exception? = null
@@ -212,9 +227,9 @@ internal abstract class Collector {
     protected fun checkOk() { error?.let { throw it } }
 }
 
-private fun hex(id: Long) = "0x" + java.lang.Long.toHexString(id)
+internal fun hex(id: Long) = "0x" + java.lang.Long.toHexString(id)
 
-private fun packageOf(className: String, msg: Messages): String {
+internal fun packageOf(className: String, msg: Messages): String {
     val base = className.substringBefore('[')
     if (base != className && '.' !in base) return msg["misc.primitiveArrays"]
     val dot = base.lastIndexOf('.')
@@ -237,7 +252,7 @@ internal fun HeapObject.className(): String = when (this) {
     is HeapPrimitiveArray -> arrayClassName
 }
 
-private fun HeapObject.label(): String = if (this is HeapClass) "class $name" else className()
+internal fun HeapObject.label(): String = if (this is HeapClass) "class $name" else className()
 
 internal fun HeapObject.shallowSize(): Long = when (this) {
     is HeapClass -> recordSize.toLong()
@@ -254,13 +269,13 @@ internal fun HeapGraph.indexOf(lookedUp: HeapObject) =
     else lookedUp.objectIndex
 
 /** Thread fields moved into Thread.holder (Thread$FieldHolder) in JDK 19+. */
-private fun HeapInstance.threadField(name: String) =
+internal fun HeapInstance.threadField(name: String) =
     this["java.lang.Thread", name]?.value
         ?: this["java.lang.Thread", "holder"]?.valueAsInstance?.get("java.lang.Thread\$FieldHolder", name)?.value
 
-private fun HeapInstance.field(name: String) = readFields().firstOrNull { it.name == name }?.value
+internal fun HeapInstance.field(name: String) = readFields().firstOrNull { it.name == name }?.value
 
-private fun HeapInstance.refField(name: String) = field(name)?.asObject
+internal fun HeapInstance.refField(name: String) = field(name)?.asObject
 
 /** Entries of a Properties / Hashtable / HashMap / ConcurrentHashMap (JDK 8+): walks `table` buckets via `next`. */
 private fun readMap(map: HeapInstance): Map<String, String> {
@@ -448,6 +463,15 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val waste = WasteCollector(graph, n)
         val refs = RefCollector(graph)
         val offHeap = OffHeapCollector()
+        val conc = ConcurrencyCollector()
+        // defining ClassLoader of each object's class, as a small index (0 = bootstrap)
+        val loaderOf = IntArray(n)
+        val loaderIndex = hashMapOf(0L to 0)
+        val loaderByClass = HashMap<Long, Int>()
+        fun loaderIdx(loaderId: Long) = loaderIndex.getOrPut(loaderId) { loaderIndex.size }
+        fun loaderOfClass(classId: Long) = loaderByClass.getOrPut(classId) {
+            loaderIdx((graph.findObjectByIdOrNull(classId) as? HeapClass)?.readRecord()?.classLoaderId ?: 0L)
+        }
 
         fun addEdge(from: Int, toId: Long) {
             val target = graph.findObjectByIdOrNull(toId) ?: return
@@ -476,11 +500,13 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                 is HeapClass -> {
                     for (f in obj.readStaticFields()) if (f.value.isNonNullReference) addEdge(idx, f.value.asNonNullObjectId!!)
                     val loaderId = obj.readRecord().classLoaderId
+                    loaderOf[idx] = loaderIdx(loaderId)
                     classesPerLoader.merge(loaderId, 1, Int::plus)
                     if (loaderId != 0L) addEdge(idx, loaderId)
                 }
                 is HeapInstance -> {
                     addEdge(idx, obj.instanceClassId) // an instance keeps its class alive
+                    loaderOf[idx] = loaderOfClass(obj.instanceClassId)
                     val fields = obj.readFields().toList()
                     for (f in fields) {
                         if (!f.value.isNonNullReference) continue
@@ -499,12 +525,14 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                     waste.instance(obj, name, fields, size)
                     refs.instance(obj, name, fields)
                     offHeap.instance(name, fields)
+                    conc.instance(obj, name)
                     if (isLoaderClass.getOrPut(obj.instanceClassId) { obj instanceOf "java.lang.ClassLoader" }) {
                         loaderIds.add(obj.objectId)
                     }
                     if (name in opt.leakClasses && leakIds.size < SUSPECTS * 2) leakIds.add(obj.objectId)
                 }
                 is HeapObjectArray -> {
+                    loaderOf[idx] = loaderOfClass(obj.arrayClassId)
                     var length = 0
                     var nulls = 0
                     for (e in obj.readElements()) {
@@ -523,19 +551,21 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             edgeSrc.add(n); edgeDst.add(r)
         }
 
+        // ---- reference graph in CSR form; BFS tree from the roots (shortest paths) ----
+        val offsets = IntArray(n + 2)
+        for (i in 0 until edgeSrc.size) offsets[edgeSrc.data[i] + 1]++
+        for (i in 0..n) offsets[i + 1] += offsets[i]
+        val targets = IntArray(edgeSrc.size)
+        val fill = offsets.copyOf(n + 1)
+        for (i in 0 until edgeSrc.size) targets[fill[edgeSrc.data[i]]++] = edgeDst.data[i]
+        edgeSrc.data = IntArray(0); edgeDst.data = IntArray(0)
+        val bfsParent = bfsParents(n + 1, n, offsets, targets)
+
         // ---- dominator tree / retained sizes ----
         var dom: Dominators? = null
         var retained: LongArray? = null
         if (opt.retained) {
-            opt.log(opt.msg["log.dominators", edgeSrc.size])
-            val offsets = IntArray(n + 2)
-            for (i in 0 until edgeSrc.size) offsets[edgeSrc.data[i] + 1]++
-            for (i in 0..n) offsets[i + 1] += offsets[i]
-            val targets = IntArray(edgeSrc.size)
-            val fill = offsets.copyOf(n + 1)
-            for (i in 0 until edgeSrc.size) targets[fill[edgeSrc.data[i]]++] = edgeDst.data[i]
-            edgeSrc.data = IntArray(0); edgeDst.data = IntArray(0)
-
+            opt.log(opt.msg["log.dominators", targets.size])
             val d = dominators(n + 1, n, offsets, targets)
             val ret = shallow.copyOf()
             for (k in d.order.size - 1 downTo 1) {
@@ -595,7 +625,8 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                 .map { NamedCount(it.key, it.value) }.sortedByDescending { it.count }
         }
         opt.log(opt.msg["log.threads"])
-        val threads = guard("section.threads", emptyList()) { readThreads(file, graph, retained) }
+        val tlValues = HashMap<String, Int>()
+        val threads = guard("section.threads", emptyList()) { readThreads(file, graph, retained, tlValues) }
 
         // ---- strings / arrays / class loaders ----
         val duplicateStrings = guard("section.strings", emptyList()) {
@@ -637,6 +668,27 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val wasteReport = guard("section.waste", null) { waste.result(top, strings) }
         val refReport = guard("section.references", null) { refs.result(top) }
         val offHeapReport = guard("section.offHeap", null) { offHeap.result() }
+        val concurrency = guard("section.concurrency", null) { conc.result(graph, retained, threads, tlValues, top) }
+
+        // ---- leak detection, merged paths, aggregated retained ----
+        opt.log(opt.msg["log.leaks"])
+        val leakSuspects = guard("section.leaks", null) { leakSuspects(file, graph, opt.leakClasses, top) }
+        val heap = Heap(graph, n, ids, clsOf, classAccs.map { it.name }, loaderOf, dom, retained)
+        val mergedPaths = guard("section.merged", emptyList()) {
+            val rootTypes = HashMap<Int, String>()
+            for (r in graph.gcRoots) graph.findObjectByIdOrNull(r.id)?.let { rootTypes.putIfAbsent(graph.indexOf(it), r::class.simpleName ?: "?") }
+            val classAcc = accByName["java.lang.Class"]
+            val biggest = classAccs.indices.filter { it != classAcc }
+                .sortedByDescending { if (opt.retained) classAccs[it].retained else classAccs[it].shallow }.take(MERGED_CLASSES)
+            mergedPaths(heap, bfsParent, rootTypes, (biggest + opt.leakClasses.mapNotNull { accByName[it] }).distinct())
+        }
+        val retainedViews = guard("section.retainedViews", null) {
+            if (dom == null) return@guard null
+            val labels = arrayOfNulls<String>(loaderIndex.size)
+            for ((id, i) in loaderIndex) labels[i] = if (id == 0L) "<bootstrap>"
+                else graph.findObjectByIdOrNull(id)?.let { "${it.className()} @${hex(id)}" } ?: hex(id)
+            retainedViews(heap, labels.map { it ?: "?" }, top, opt.msg)
+        }
 
         val summary = Summary(
             file = file.name,
@@ -695,7 +747,8 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         )
         val report = HeapReport(summary, classStats(classAccs), packageStats(classAccs), retainedObjects, tree, leaks, gcRoots,
             threads, duplicateStrings, arrays, classLoaders, warnings, jvm, vmArgs, frameworks,
-            proxies = proxyReport { true }, waste = wasteReport, references = refReport, offHeap = offHeapReport, app = app,
+            proxies = proxyReport { true }, waste = wasteReport, references = refReport, offHeap = offHeapReport,
+            leakSuspects = leakSuspects, mergedPaths = mergedPaths, retainedViews = retainedViews, concurrency = concurrency, app = app,
             histogram = classAccs.sortedByDescending { it.shallow }
                 .map { ClassStat(it.name, it.count, it.shallow, if (opt.retained) it.retained else null) })
         return report.copy(health = guard("section.health", emptyList()) { health(report) })
@@ -720,102 +773,4 @@ private fun buildTree(graph: HeapGraph, ids: LongArray, dom: Dominators, retaine
         return TreeNode(name, retained[v], kids.ifEmpty { null })
     }
     return node(n, 0)
-}
-
-private fun findPaths(
-    file: File, graph: HeapGraph, suspects: Set<Long>, opt: Options, warnings: MutableList<String>,
-): List<LeakPath> {
-    val analyzer = HeapAnalyzer(OnAnalysisProgressListener.NO_OP)
-    val matchers = listOf(IgnoredReferenceMatcher(InstanceFieldPattern("java.lang.ref.Reference", "referent")))
-    fun warn(id: Long, e: Throwable) {
-        val w = opt.msg["log.analyzerFailed", hex(id), e.toString()]
-        opt.log(w); warnings.add(w)
-    }
-    // ponytail: one BFS per suspect; a single analyze() drops paths that pass through another suspect.
-    return suspects.flatMap { id ->
-        // Shark can throw before its own try (e.g. class name indexed but CLASS_DUMP missing from the dump)
-        val analysis = try {
-            analyzer.analyze(
-                heapDumpFile = file,
-                graph = graph,
-                leakingObjectFinder = LeakingObjectFinder { setOf(id) },
-                referenceMatchers = matchers,
-                computeRetainedHeapSize = false,
-                objectInspectors = ObjectInspectors.jdkDefaults,
-            )
-        } catch (e: Exception) {
-            warn(id, e)
-            return@flatMap emptyList()
-        }
-        if (analysis is HeapAnalysisFailure) {
-            warn(id, analysis.exception)
-            return@flatMap emptyList()
-        }
-        (analysis as HeapAnalysisSuccess).allLeaks.flatMap { it.leakTraces }.map { trace ->
-            val objects = trace.referencePath.map { it.originObject } + trace.leakingObject
-            val refs = listOf<String?>(null) + trace.referencePath.map { ref ->
-                val static = if (ref.referenceType == ReferenceType.STATIC_FIELD) "static " else ""
-                "$static${ref.owningClassSimpleName}.${ref.referenceDisplayName}"
-            }
-            LeakPath(
-                title = "${trace.leakingObject.className} @${hex(id)}",
-                gcRoot = trace.gcRootType.description,
-                nodes = objects.mapIndexed { i, o ->
-                    PathNode(o.className, o.typeName, o.leakingStatus.name, o.leakingStatusReason, o.labels.toList(), refs[i])
-                },
-            )
-        }.toList()
-    }
-}
-
-private fun readThreads(file: File, graph: HeapGraph, retained: LongArray?): List<ThreadInfo> {
-    val strings = HashMap<Long, String>()
-    val classNameIdBySerial = HashMap<Int, Long>()
-    val frames = HashMap<Long, StackFrameRecord>()
-    val traces = HashMap<Int, StackTraceRecord>()
-    StreamingHprofReader.readerFor(file).asStreamingRecordReader().readRecords(
-        setOf(StringRecord::class, LoadClassRecord::class, StackFrameRecord::class, StackTraceRecord::class)
-    ) { _, r ->
-        when (r) {
-            is StringRecord -> strings[r.id] = r.string
-            is LoadClassRecord -> classNameIdBySerial[r.classSerialNumber] = r.classNameStringId
-            is StackFrameRecord -> frames[r.id] = r
-            is StackTraceRecord -> traces[r.stackTraceSerialNumber] = r
-            else -> Unit
-        }
-    }
-
-    // objects held as locals by each (thread, frame)
-    val locals = HashMap<Pair<Int, Int>, MutableList<String>>()
-    for (root in graph.gcRoots) if (root is GcRoot.JavaFrame) {
-        val o = graph.findObjectByIdOrNull(root.id) ?: continue
-        locals.getOrPut(root.threadSerialNumber to root.frameNumber) { ArrayList() }.add(o.label())
-    }
-
-    return graph.gcRoots.filterIsInstance<GcRoot.ThreadObject>().mapNotNull { root ->
-        val thread = graph.findObjectByIdOrNull(root.id)?.asInstance ?: return@mapNotNull null
-        val frameList = traces[root.stackTraceSerialNumber]?.stackFrameIds?.mapIndexed { i, fid ->
-            val f = frames[fid]
-            val text = if (f == null) "?" else {
-                val cls = strings[classNameIdBySerial[f.classSerialNumber]]?.replace('/', '.') ?: "?"
-                val method = strings[f.methodNameStringId] ?: "?"
-                val src = strings[f.sourceFileNameStringId]
-                val where = when {
-                    f.lineNumber > 0 -> "$src:${f.lineNumber}"
-                    f.lineNumber == -3 -> "Native Method"
-                    else -> src ?: "Unknown Source"
-                }
-                "$cls.$method($where)"
-            }
-            Frame(text, locals[root.threadSerialNumber to i].orEmpty())
-        }.orEmpty()
-        ThreadInfo(
-            name = thread.threadField("name")?.readAsJavaString() ?: "?",
-            id = hex(thread.objectId),
-            daemon = thread.threadField("daemon")?.asBoolean,
-            priority = thread.threadField("priority")?.asInt,
-            retained = retained?.get(graph.indexOf(thread)),
-            frames = frameList,
-        )
-    }.sortedByDescending { it.retained ?: 0 }
 }

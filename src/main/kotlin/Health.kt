@@ -16,6 +16,7 @@ private const val BIG_DOMINATOR = 0.30
 private const val LOW_FILL = 0.25
 private const val MIN_FILL_INSTANCES = 1000
 private const val FINALIZER_QUEUE = 10_000L
+private const val POOL_QUEUE = 10_000
 private const val WEBAPP_LOADERS = 2
 private const val DUP_STRINGS = 0.10
 private const val EMPTY_COLLECTIONS = 0.05
@@ -34,6 +35,8 @@ internal fun health(r: HeapReport): List<HealthFinding> = buildList {
         if (s.reachableBytes != null && o.retained > heap * BIG_DOMINATOR) add(CRITICAL, "bigDominator", "objects", pct(o.retained.toDouble(), heap), o.className)
     }
     r.references?.finalizerQueue?.let { if (it > FINALIZER_QUEUE) add(CRITICAL, "finalizerQueue", "references", it) }
+    r.concurrency?.pools?.filter { (it.queued ?: 0) > POOL_QUEUE }?.forEach { add(CRITICAL, "poolQueue", "concurrency", it.className, it.queued!!) }
+    r.leakSuspects?.groups?.count { it.kind == "application" }?.let { if (it > 0) add(WARNING, "leakSuspects", "leaks", it) }
     r.waste?.collections?.filter { it.count >= MIN_FILL_INSTANCES && it.capacity > 0 }?.let { big ->
         val size = big.sumOf { it.size }.toDouble()
         val capacity = big.sumOf { it.capacity }.toDouble()

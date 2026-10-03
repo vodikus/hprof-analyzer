@@ -166,6 +166,29 @@ um objeto retendo mais de 30% do heap alcançável, fila do Finalizer acima de 1
 médio abaixo de 25%, 2 ou mais ClassLoaders de webapp (Tomcat/Jetty), strings duplicadas acima de 10% do heap, grupos
 de proxies suspeitos e coleções vazias com array alocado acima de 5% do heap. Os limiares ficam em `Health.kt`.
 
+### Suspeitas de leak
+Uma única análise do Shark (`FilteringLeakingObjectFinder`) com regras de JVM: thread terminada ainda referenciada,
+ClassLoader de webapp do Tomcat parado (`STOPPED`/`DESTROYED`), sessão HTTP inválida, `FileInputStream`/
+`FileOutputStream`/`RandomAccessFile` fechados e retidos, e as classes de `--leak-class`. Os caminhos são agrupados
+pela assinatura do Shark (N ocorrências do mesmo padrão). Caminhos que passam por referências conhecidas do JDK
+(`Thread.contextClassLoader`, valor de `ThreadLocal`, `DriverManager.registeredDrivers`, shutdown hooks) viram
+"biblioteca". O retained de cada grupo é a estimativa do Shark, calculada sobre a árvore de menores caminhos dele, e
+pode diferir da dominator tree.
+
+### Caminhos agregados por classe
+Sankey dos menores caminhos (BFS a partir dos GC roots) até as instâncias das 5 maiores classes e das classes de
+`--leak-class`, agregados por classe, como o "merge shortest paths" do MAT. Até 10 mil instâncias e 8 saltos por classe.
+
+### Retained agregado
+Sunburst ClassLoader → pacote → classe; campos estáticos cujo valor é dominado pela própria classe (caches estáticos e
+singletons); e, para as 10 maiores classes, a classe do dominador imediato das instâncias ("quem segura X").
+
+### Concorrência
+Estado de cada thread pelo campo `threadStatus` (o hprof não guarda monitores), `ThreadPoolExecutor` (core, máx,
+threads, tipo e tamanho da fila), `ForkJoinPool`, `Timer`, virtual threads e o retained das continuations, classes dos
+valores em `ThreadLocal`, stacks idênticas agrupadas e um sunburst dos frames a partir do topo da stack. A tabela de
+threads ganhou estado, retained de locals, retained e contagem de `ThreadLocal`s e entradas órfãs (chave coletada).
+
 ### Desperdício de memória
 - **Coleções**: `ArrayList`, `Vector`, `HashMap`, `LinkedHashMap`, `WeakHashMap`, `Hashtable`, `ConcurrentHashMap` e
   `ArrayDeque` (só as classes exatas; `HashSet` aparece como o seu `HashMap` interno). Por tipo: vazias com array
@@ -266,6 +289,10 @@ Grupos de chaves: `cli.*` (uso e erros), `log.*` (progresso), `report.*`, `secti
 | `src/main/kotlin/Analyzer.kt` | Abre o dump com o Shark e monta o modelo de dados `HeapReport`. |
 | `src/main/kotlin/Dominators.kt` | Algoritmo da dominator tree. |
 | `src/main/kotlin/Waste.kt`, `References.kt`, `OffHeap.kt` | Coletores chamados na passada única; cada um vira uma seção. |
+| `src/main/kotlin/Leaks.kt` | Caminhos por suspeito e detecção de leaks (regras de JVM, padrões de biblioteca). |
+| `src/main/kotlin/Paths.kt` | Árvore BFS dos GC roots e caminhos agregados por classe. |
+| `src/main/kotlin/Retained.kt` | Retained por ClassLoader, campos estáticos e dominadores imediatos por classe. |
+| `src/main/kotlin/Threads.kt` | Threads, pools, virtual threads, ThreadLocals, stacks agrupadas. |
 | `src/main/kotlin/Health.kt` | Regras do painel de saúde (função pura sobre o `HeapReport`). |
 | `src/main/kotlin/Snapshot.kt` | Snapshot JSON com o histograma completo (`--format json`). |
 | `src/main/kotlin/Reports.kt` | Geração do Markdown e do HTML. |

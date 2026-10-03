@@ -115,6 +115,23 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
     table(listOf("col.id", "col.class", "col.shallow", "col.retained", "col.detail"),
         r.retainedObjects.map { listOf(it.id, it.className, b(it.shallow), b(it.retained), it.detail) })
 
+    r.leakSuspects?.let { lk ->
+        section("section.leaks")
+        appendLine("> ${msg["note.leaks"]}\n")
+        appendLine("**${msg["leaks.objects"]}:** ${n(lk.leakingObjects)}\n")
+        table(listOf("col.kind", "col.description", "col.occurrences", "col.retained"),
+            lk.groups.map { listOf(msg["leaks.kind.${it.kind}"], it.description, n(it.occurrences), b(it.retained)) })
+        lk.groups.forEachIndexed { i, g ->
+            appendLine("**${i + 1}. ${md(g.trace.title)}** (${md(msg["paths.gcRoot", g.trace.gcRoot])})\n")
+            appendLine("```")
+            g.trace.nodes.forEach { node ->
+                node.reference?.let { appendLine("    ↓ $it") }
+                appendLine("${node.className} [${node.status}${if (node.reason.isNotEmpty()) ": " + node.reason else ""}]")
+            }
+            appendLine("```\n")
+        }
+    }
+
     section("section.paths")
     appendLine("${msg["note.paths"]}\n")
     if (r.leaks.isEmpty()) appendLine("_${msg["misc.noData"]}_\n")
@@ -136,16 +153,41 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
     }
 
     val full = r.appScope == null // the application view drops sections that cannot be split by class
+    if (r.mergedPaths.isNotEmpty()) {
+        section("section.merged")
+        appendLine("> ${msg["note.merged"]}\n")
+        r.mergedPaths.forEach { m ->
+            appendLine("### ${md(m.className)}\n")
+            appendLine("${msg["merged.sampled", n(m.instances), n(m.sampled)]}\n")
+            table(listOf("col.dominator", "col.class", "col.instances"),
+                m.links.map { listOf(it.source.substringAfter('|'), it.target.substringAfter('|'), n(it.value)) })
+        }
+    }
+    r.retainedViews?.let { rv ->
+        section("section.retainedViews")
+        appendLine("> ${msg["note.retainedViews"]}\n")
+        appendLine("### ${msg["retained.byLoader"]}\n")
+        table(listOf("col.loaders", "col.package", "col.retained"),
+            rv.byLoader?.children.orEmpty().flatMap { l -> l.children.orEmpty().map { p -> listOf(l.name, p.name, b(p.value)) } })
+        appendLine("### ${msg["retained.staticFields"]}\n")
+        table(listOf("col.owner", "col.field", "col.valueClass", "col.retained"),
+            rv.staticFields.map { listOf(it.owner, it.field, it.valueClass, b(it.retained)) })
+        appendLine("### ${msg["retained.dominators"]}\n")
+        table(listOf("col.class", "col.dominator", "col.count", "col.retained"),
+            rv.dominators.flatMap { c -> c.by.map { listOf(c.className, it.className, n(it.count), b(it.retained)) } })
+    }
     if (full) {
         section("section.gcRoots")
         table(listOf("col.type", "col.count"), r.gcRoots.map { listOf(it.name, n(it.count)) })
     }
 
     section("section.threads")
-    table(listOf("col.name", "col.id", "col.daemon", "col.priority", "col.retained", "col.frames"),
+    table(listOf("col.name", "col.id", "col.state", "col.daemon", "col.priority", "col.retained", "col.localsRetained",
+        "col.tlRetained", "col.threadLocals", "col.stale", "col.frames"),
         r.threads.map { t ->
             val daemon = t.daemon?.let { if (it) msg["misc.yes"] else msg["misc.no"] }
-            listOf(t.name, t.id, daemon, t.priority, b(t.retained), t.frames.size)
+            listOf(t.name, t.id, t.state, daemon, t.priority, b(t.retained), b(t.localsRetained), b(t.threadLocalsRetained),
+                n(t.threadLocals), n(t.staleThreadLocals), t.frames.size)
         })
     r.threads.filter { it.frames.isNotEmpty() }.forEach { t ->
         appendLine("<details><summary>${md(t.name).replace("<", "&lt;")}</summary>\n\n```")
@@ -154,6 +196,26 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
             f.locals.forEach { appendLine("    local: $it") }
         }
         appendLine("```\n</details>\n")
+    }
+
+    r.concurrency?.let { c ->
+        section("section.concurrency")
+        appendLine("> ${msg["note.concurrency"]}\n")
+        appendLine("### ${msg["conc.states"]}\n")
+        table(listOf("col.state", "col.count"), c.states.map { listOf(it.name, n(it.count)) })
+        appendLine("**${msg["conc.virtual"]}:** ${n(c.virtualThreads)} · ${msg["conc.virtualRetained"]}: ${b(c.virtualRetained)}\n")
+        appendLine("### ${msg["conc.pools"]}\n")
+        table(listOf("col.type", "col.class", "col.id", "col.core", "col.max", "col.threads", "col.queue", "col.queued", "col.completed"),
+            c.pools.map { listOf(it.kind, it.className, it.id, it.core, it.max, it.threads, it.queueType, n(it.queued), n(it.completed)) })
+        appendLine("### ${msg["conc.tlValues"]}\n")
+        table(listOf("col.class", "col.count"), c.threadLocalValues.map { listOf(it.name, n(it.count)) })
+        appendLine("### ${msg["conc.stackGroups"]}\n")
+        if (c.stackGroups.isEmpty()) appendLine("_${msg["misc.noData"]}_\n")
+        c.stackGroups.forEach { g ->
+            appendLine("<details><summary>${msg["conc.group", g.count]}: ${md(g.threads.joinToString()).replace("<", "&lt;")}</summary>\n\n```")
+            g.frames.forEach { appendLine("at $it") }
+            appendLine("```\n</details>\n")
+        }
     }
 
     if (full) {

@@ -109,7 +109,12 @@ class AnalyzerTest {
             java.nio.ByteBuffer.allocateDirect(1024 * 1024),
             List(30) { java.lang.ref.SoftReference(Any()) },
             List(40) { java.lang.ref.WeakReference(Any()) },
+            Thread {}.apply { name = "finished-worker"; start(); join() }, // terminated, still referenced: leak rule
         )
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(3)
+        repeat(23) { pool.execute { gate.await() } } // 3 running (identical stacks), 20 queued
+        val threadLocal = ThreadLocal<ByteArray>().apply { set(ByteArray(1024)) }
         val dump = File.createTempFile("self", ".hprof").also { it.delete() }
         try {
             ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean::class.java).dumpHeap(dump.path, true)
@@ -175,6 +180,26 @@ class AnalyzerTest {
                 .forEach { assertContains(toMarkdown(report), it) }
             assertContains(toHtml(report), "\"waste\":{")
 
+            // phase 2: leak rules, merged paths, aggregated retained, concurrency
+            val leakGroups = report.leakSuspects!!.groups
+            assertTrue(leakGroups.any { g -> g.trace.nodes.last().className == "java.lang.Thread" && g.trace.nodes.last().status == "LEAKING" },
+                "terminated thread: ${leakGroups.map { it.trace.title }}")
+            val markerPaths = report.mergedPaths.first { it.className == LeakMarker::class.java.name }
+            assertTrue(markerPaths.links.any { it.source.endsWith("|class hprof.Holder") && it.target == "0|${LeakMarker::class.java.name}" },
+                "merged paths: ${markerPaths.links}")
+            val rv = report.retainedViews!!
+            assertTrue(rv.staticFields.any { it.owner == "hprof.Holder" && it.field == "marker" && it.retained >= 10 * 1024 * 1024 }, "statics: ${rv.staticFields.take(5)}")
+            assertTrue(rv.byLoader!!.children!!.isNotEmpty())
+            assertTrue(rv.dominators.isNotEmpty())
+            val cc = report.concurrency!!
+            assertTrue(cc.pools.any { it.kind == "ThreadPoolExecutor" && it.queued == 20 && it.threads == 3 }, "pools: ${cc.pools}")
+            assertTrue(cc.states.any { it.name == "RUNNABLE" }, "states: ${cc.states}")
+            val me = report.threads.first { it.name == Thread.currentThread().name }
+            assertTrue((me.threadLocals ?: 0) > 0 && me.state == "RUNNABLE", "current thread: $me")
+            assertTrue(cc.stackGroups.any { it.count >= 3 }, "stack groups: ${cc.stackGroups.map { it.count }}")
+            listOf("## Suspeitas de leak", "## Caminhos agregados por classe", "## Retained agregado", "## Concorrência")
+                .forEach { assertContains(toMarkdown(report), it) }
+
             // a failed section is flagged at the top of both reports
             val warned = report.copy(warnings = listOf("Aviso: \"Caminhos até GC roots\" falhou, seção omitida: boom"))
             assertContains(toMarkdown(warned), "## Avisos")
@@ -206,6 +231,7 @@ class AnalyzerTest {
             Holder.marker = null
             Holder.proxies = emptyList()
             Holder.waste = emptyList()
+            gate.countDown(); pool.shutdown(); threadLocal.remove()
         }
     }
 

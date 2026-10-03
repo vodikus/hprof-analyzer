@@ -173,7 +173,7 @@ const DATA = /*DATA*/;
       tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
         formatter: ps => { const d = data[ps[0].dataIndex];
           return `${esc(d.name)}<br><b>${fmt(ps[0].value)}</b>` + (extra ? '<br>' + esc(extra(d)) : ''); } }),
-      xAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: fmt }, splitLine: { lineStyle: { color: css('--grid') } } },
+      xAxis: { type: 'value', minInterval: fmt === num ? 1 : 0, axisLabel: { color: css('--muted'), formatter: fmt }, splitLine: { lineStyle: { color: css('--grid') } } },
       yAxis: { type: 'category', data: data.map(d => short(d.name)), axisLabel: { color: css('--text-2') },
                axisLine: { lineStyle: { color: css('--axis') } }, axisTick: { show: false } },
       series: [{ type: 'bar', data: data.map(d => d.value), barMaxWidth: 16, itemStyle: { color: css('--series-1'), borderRadius: [0, 4, 4, 0] } }],
@@ -362,6 +362,54 @@ const DATA = /*DATA*/;
     }), 620);
   }
 
+  // ---- Retained agregado ----
+  const rv = DATA.retainedViews;
+  if (rv) {
+    const rs = section('retained', t('section.retainedViews'), t('note.retainedViews'));
+    if (rv.byLoader?.children?.length) {
+      rs.append(el('h3', { text: t('retained.byLoader') }));
+      chart(rs, () => ({
+        textStyle: baseText(),
+        tooltip: tooltip({ formatter: p => `${esc(p.treePathInfo.slice(1).map(x => x.name).join(' › '))}<br><b>${bytes(p.value)}</b>` }),
+        series: [{
+          type: 'sunburst', data: rv.byLoader.children, radius: ['12%', '95%'], sort: null,
+          itemStyle: { borderColor: css('--surface'), borderWidth: 2 },
+          label: { color: '#fff', minAngle: 12, formatter: p => short(p.name).slice(-24) },
+          levels: [{}, { itemStyle: { color: css('--seq-4') } }, { itemStyle: { color: css('--seq-3') } }, { itemStyle: { color: css('--seq-2') }, label: { color: css('--text') } }],
+        }],
+      }), 560);
+    }
+    rs.append(el('h3', { text: t('retained.staticFields') }));
+    const sf = rv.staticFields || [];
+    if (sf.length) chart(rs, () => hbar(sf.slice(0, 20).map(f => ({ name: `${f.owner}.${f.field}`, value: f.retained, f })), bytes,
+      d => t('col.valueClass') + ': ' + d.f.valueClass), barHeight(Math.min(20, sf.length)));
+    rs.append(table([
+      { h: t('col.owner'), v: r => r.owner, mono: true },
+      { h: t('col.field'), v: r => r.field, mono: true },
+      { h: t('col.valueClass'), v: r => r.valueClass, mono: true },
+      { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    ], sf));
+    const dc = rv.dominators || [];
+    if (dc.length) {
+      rs.append(el('h3', { text: t('retained.dominators') }));
+      const dSel = el('select', { 'aria-label': t('col.class') }, ...dc.map((c, i) => el('option', { value: i, text: `${c.className} (${bytes(c.retained)})` })));
+      rs.append(el('div', { class: 'toolbar' }, t('col.class'), dSel));
+      const dChart = chart(rs, () => {
+        const c = dc[+dSel.value];
+        return hbar(c.by.map(d => ({ name: d.className, value: d.retained, count: d.count })), bytes, d => t('col.instances') + ': ' + num(d.count));
+      }, barHeight(10));
+      const dTable = el('div');
+      const showTable = () => dTable.replaceChildren(table([
+        { h: t('col.dominator'), v: r => r.className, mono: true },
+        { h: t('col.instances'), v: r => r.count, f: num, num: true },
+        { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+      ], dc[+dSel.value].by));
+      dSel.onchange = () => { draw(dChart); showTable(); };
+      rs.append(dTable);
+      showTable();
+    }
+  }
+
   // ---- Maiores objetos ----
   section('objects', t('section.objects')).append(table([
     { h: t('col.id'), v: r => r.id, mono: true },
@@ -372,15 +420,16 @@ const DATA = /*DATA*/;
   ], DATA.retainedObjects));
 
   // ---- Caminhos GC root → objeto ----
-  const lk = section('paths', t('section.paths'), t('note.paths'));
-  if (DATA.leaks.length) {
+  // Path graph (GC root → object) with a selector; paths: [{title, gcRoot, nodes}]
+  function renderPaths(lk, paths, selLabel) {
+    if (!paths.length) { lk.append(el('p', { class: 'muted', text: t('misc.noData') })); return; }
     const statusColor = st => css(st === 'LEAKING' ? '--critical' : st === 'NOT_LEAKING' ? '--good' : '--neutral');
-    const leakSel = el('select', { 'aria-label': t('paths.object') }, ...DATA.leaks.map((l, i) => el('option', { value: i, text: `${i + 1}. ${l.title} (${t('paths.nodes', l.nodes.length)})` })));
+    const leakSel = el('select', { 'aria-label': selLabel }, ...paths.map((l, i) => el('option', { value: i, text: `${i + 1}. ${l.title} (${t('paths.nodes', l.nodes.length)})` })));
     const legend = ['LEAKING', 'NOT_LEAKING', 'UNKNOWN'].map(st => el('span', { class: 'status', style: '--c:' + statusColor(st), text: st }));
-    lk.append(el('div', { class: 'toolbar' }, t('paths.object'), leakSel, ...legend));
-    const maxNodes = DATA.leaks.reduce((m, l) => Math.max(m, l.nodes.length), 0);
+    lk.append(el('div', { class: 'toolbar' }, selLabel, leakSel, ...legend));
+    const maxNodes = paths.reduce((m, l) => Math.max(m, l.nodes.length), 0);
     const leakChart = chart(lk, () => {
-      const l = DATA.leaks[+leakSel.value];
+      const l = paths[+leakSel.value];
       return {
         textStyle: baseText(),
         tooltip: tooltip({ formatter: p => p.dataType === 'edge' ? esc(p.data.ref)
@@ -403,7 +452,7 @@ const DATA = /*DATA*/;
     }, Math.max(200, maxNodes * 80 + 20));
     const detail = el('div');
     const showDetail = () => {
-      const l = DATA.leaks[+leakSel.value];
+      const l = paths[+leakSel.value];
       const lines = [t('paths.gcRoot', l.gcRoot)];
       l.nodes.forEach(n => {
         if (n.reference) lines.push('    ↓ ' + n.reference);
@@ -414,7 +463,63 @@ const DATA = /*DATA*/;
     leakSel.onchange = () => { draw(leakChart); showDetail(); };
     lk.append(detail);
     showDetail();
-  } else lk.append(el('p', { class: 'muted', text: t('misc.noData') }));
+  }
+
+  // ---- Suspeitas de leak ----
+  const ls = DATA.leakSuspects;
+  if (ls) {
+    const lsec = section('leaks', t('section.leaks'), t('note.leaks'));
+    const kinds = ['application', 'library'];
+    lsec.append(el('div', { class: 'tiles' }, tile(t('leaks.objects'), num(ls.leakingObjects)),
+      ...kinds.map(k => tile(t('leaks.kind.' + k), num(ls.groups.filter(g => g.kind === k).length)))));
+    if (ls.groups.length) {
+      chart(lsec, () => hbar(ls.groups.slice(0, 20).map((g, i) => ({ name: `${i + 1}. ${g.trace.title}`, value: g.retained || 0, g })), bytes,
+        d => `${t('leaks.kind.' + d.g.kind)} · ${t('col.occurrences')}: ${num(d.g.occurrences)}`), barHeight(Math.min(20, ls.groups.length)));
+      lsec.append(table([
+        { h: '#', v: r => r.i, num: true },
+        { h: t('col.kind'), v: r => t('leaks.kind.' + r.kind) },
+        { h: t('col.description'), v: r => r.description },
+        { h: t('col.occurrences'), v: r => r.occurrences, f: num, num: true },
+        { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+      ], ls.groups.map((g, i) => ({ ...g, i: i + 1 }))));
+    }
+    renderPaths(lsec, ls.groups.map((g, i) => ({ ...g.trace, title: `${g.trace.title} [${t('leaks.kind.' + g.kind)}, ${num(g.occurrences)}×]` })), t('leaks.group'));
+  }
+
+  renderPaths(section('paths', t('section.paths'), t('note.paths')), DATA.leaks, t('paths.object'));
+
+  // ---- Caminhos agregados (Sankey) ----
+  const mp = DATA.mergedPaths || [];
+  if (mp.length) {
+    const ms = section('merged', t('section.merged'), t('note.merged'));
+    const mSel = el('select', { 'aria-label': t('col.class') }, ...mp.map((m, i) => el('option', { value: i, text: m.className })));
+    const mInfo = el('span', { class: 'muted' });
+    ms.append(el('div', { class: 'toolbar' }, t('col.class'), mSel, mInfo));
+    const label = name => name.slice(name.indexOf('|') + 1);
+    const mChart = chart(ms, () => {
+      const m = mp[+mSel.value];
+      mInfo.textContent = t('merged.sampled', num(m.instances), num(m.sampled));
+      // label only nodes carrying >= 5% of the instances; the rest keep the tooltip
+      const flowIn = {}, flowOut = {};
+      m.links.forEach(l => { flowOut[l.source] = (flowOut[l.source] || 0) + l.value; flowIn[l.target] = (flowIn[l.target] || 0) + l.value; });
+      const big = name => Math.max(flowIn[name] || 0, flowOut[name] || 0) >= m.sampled * 0.05;
+      return {
+        textStyle: baseText(),
+        tooltip: tooltip({ formatter: p => p.dataType === 'edge'
+          ? `${esc(label(p.data.source))} → ${esc(label(p.data.target))}<br><b>${num(p.data.value)}</b>`
+          : `${esc(label(p.name))}<br><b>${num(p.value)}</b>` }),
+        series: [{
+          type: 'sankey', left: 8, right: 160, top: 16, bottom: 16, nodeWidth: 12, nodeGap: 10, nodeAlign: 'right',
+          emphasis: { focus: 'adjacency' },
+          data: m.nodes.map(name => ({ name, label: { show: big(name) }, itemStyle: { color: name.startsWith('0|') ? css('--seq-4') : css('--series-1'), borderColor: css('--surface') } })),
+          links: m.links,
+          label: { color: css('--text'), formatter: p => short(label(p.name)) },
+          lineStyle: { color: 'gradient', opacity: 0.35, curveness: 0.5 },
+        }],
+      };
+    }, 520);
+    mSel.onchange = () => draw(mChart);
+  }
 
   // ---- GC roots ----
   if (full) {
@@ -428,17 +533,89 @@ const DATA = /*DATA*/;
   th.append(table([
     { h: t('col.name'), v: r => r.name, mono: true },
     { h: t('col.id'), v: r => r.id, mono: true },
+    { h: t('col.state'), v: r => r.state },
     { h: t('col.daemon'), v: r => r.daemon == null ? null : (r.daemon ? t('misc.yes') : t('misc.no')) },
     { h: t('col.priority'), v: r => r.priority, num: true },
     { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    { h: t('col.localsRetained'), v: r => r.localsRetained, f: bytes, num: true },
+    { h: t('col.tlRetained'), v: r => r.threadLocalsRetained, f: bytes, num: true },
+    { h: t('col.threadLocals'), v: r => r.threadLocals, f: num, num: true },
+    { h: t('col.stale'), v: r => r.staleThreadLocals, f: num, num: true },
     { h: t('col.frames'), v: r => r.frames.length, num: true },
   ], DATA.threads));
+  // locals vs ThreadLocals per thread (top 20 by their sum); two series, so a legend
+  const tm = DATA.threads.filter(x => (x.localsRetained || 0) + (x.threadLocalsRetained || 0) > 0)
+    .sort((a, b) => (b.localsRetained + b.threadLocalsRetained) - (a.localsRetained + a.threadLocalsRetained)).slice(0, 20).reverse();
+  if (tm.length) {
+    th.append(el('h3', { text: t('conc.threadMemory') }));
+    chart(th, () => ({
+      textStyle: baseText(),
+      legend: { top: 0, left: 0, textStyle: { color: css('--text-2') } },
+      grid: { left: 12, right: 32, top: 32, bottom: 24, containLabel: true },
+      tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
+        formatter: ps => `${esc(tm[ps[0].dataIndex].name)}<br>` + ps.map(p => `${esc(p.seriesName)}: <b>${bytes(p.value)}</b>`).join('<br>') }),
+      xAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: bytes }, splitLine: { lineStyle: { color: css('--grid') } } },
+      yAxis: { type: 'category', data: tm.map(x => short(x.name)), axisLabel: { color: css('--text-2') }, axisTick: { show: false } },
+      series: [['col.localsRetained', 'localsRetained', '--series-1'], ['col.tlRetained', 'threadLocalsRetained', '--seq-4']].map(([k, f, c]) => ({
+        type: 'bar', stack: 'mem', name: t(k), data: tm.map(x => x[f] || 0), barMaxWidth: 16,
+        itemStyle: { color: css(c), borderColor: css('--surface'), borderWidth: 2 },
+      })),
+    }), barHeight(tm.length) + 30);
+  }
   const stacks = el('div', { class: 'card' });
   DATA.threads.filter(t => t.frames.length).forEach(t => {
     const text = t.frames.map(f => 'at ' + f.text + f.locals.map(l => '\n      local: ' + l).join('')).join('\n');
     stacks.append(el('details', null, el('summary', { class: 'mono', text: `${t.name} (${t.frames.length} frames)` }), el('pre', { class: 'mono', text })));
   });
   if (stacks.childElementCount) th.append(el('h3', { text: t('section.stacks') }), stacks);
+
+  // ---- Concorrência ----
+  const cc = DATA.concurrency;
+  if (cc) {
+    const cs = section('concurrency', t('section.concurrency'), t('note.concurrency'));
+    cs.append(el('div', { class: 'tiles' }, tile(t('conc.virtual'), num(cc.virtualThreads)),
+      tile(t('conc.virtualRetained'), bytes(cc.virtualRetained)), ...cc.states.map(x => tile(x.name, num(x.count)))));
+    if (cc.states.length) {
+      cs.append(el('h3', { text: t('conc.states') }));
+      chart(cs, () => hbar(cc.states.map(x => ({ name: x.name, value: x.count })), num), barHeight(cc.states.length));
+    }
+    cs.append(el('h3', { text: t('conc.pools') }));
+    const queued = cc.pools.filter(p => p.queued > 0);
+    if (queued.length) chart(cs, () => hbar(queued.slice(0, 20).map(p => ({ name: `${p.className} ${p.id}`, value: p.queued })), num), barHeight(Math.min(20, queued.length)));
+    cs.append(table([
+      { h: t('col.type'), v: r => r.kind },
+      { h: t('col.class'), v: r => r.className, mono: true },
+      { h: t('col.id'), v: r => r.id, mono: true },
+      { h: t('col.core'), v: r => r.core, f: num, num: true },
+      { h: t('col.max'), v: r => r.max, f: num, num: true },
+      { h: t('col.threads'), v: r => r.threads, f: num, num: true },
+      { h: t('col.queue'), v: r => r.queueType, mono: true },
+      { h: t('col.queued'), v: r => r.queued, f: num, num: true },
+      { h: t('col.completed'), v: r => r.completed, f: num, num: true },
+    ], cc.pools));
+    cs.append(el('h3', { text: t('conc.tlValues') }), table([
+      { h: t('col.class'), v: r => r.name, mono: true }, { h: t('col.count'), v: r => r.count, f: num, num: true },
+    ], cc.threadLocalValues));
+    cs.append(el('h3', { text: t('conc.stackGroups') }));
+    const groups = el('div', { class: 'card' });
+    cc.stackGroups.forEach(g => groups.append(el('details', null,
+      el('summary', { class: 'mono', text: `${t('conc.group', g.count)}: ${g.threads.join(', ')}` }),
+      el('pre', { class: 'mono', text: g.frames.map(f => 'at ' + f).join('\n') }))));
+    cs.append(groups.childElementCount ? groups : el('p', { class: 'muted', text: t('misc.noData') }));
+    if (cc.flame) {
+      cs.append(el('h3', { text: t('conc.flame') }));
+      chart(cs, () => ({
+        textStyle: baseText(),
+        tooltip: tooltip({ formatter: p => `${esc(p.name)}<br><b>${t('conc.group', num(p.value))}</b>` }),
+        series: [{
+          type: 'sunburst', data: cc.flame.children || [], radius: ['8%', '95%'], sort: null,
+          itemStyle: { borderColor: css('--surface'), borderWidth: 1 },
+          label: { show: false },
+          levels: [{}, ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => ({ itemStyle: { color: css(['--seq-4', '--seq-3', '--seq-2'][i % 3]) } }))],
+        }],
+      }), 560);
+    }
+  }
 
   // ---- Strings / arrays / loaders ----
   if (full) section('strings', t('section.strings')).append(table([

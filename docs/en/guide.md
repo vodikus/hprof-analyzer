@@ -166,6 +166,28 @@ one object retaining over 30% of the reachable heap, a Finalizer queue over 10,0
 fill ratio under 25%, 2 or more webapp ClassLoaders (Tomcat/Jetty), duplicate strings over 10% of the heap, suspicious
 proxy groups, and empty collections with an allocated array over 5% of the heap. Thresholds live in `Health.kt`.
 
+### Leak suspects
+A single Shark analysis (`FilteringLeakingObjectFinder`) with JVM rules: terminated thread still referenced, stopped
+Tomcat webapp ClassLoader (`STOPPED`/`DESTROYED`), invalidated HTTP session, closed `FileInputStream`/
+`FileOutputStream`/`RandomAccessFile` still retained, and the `--leak-class` classes. Paths are grouped by Shark's
+signature (N occurrences of the same pattern). Paths through well-known JDK references (`Thread.contextClassLoader`,
+`ThreadLocal` values, `DriverManager.registeredDrivers`, shutdown hooks) are "library" leaks. Each group's retained
+size is Shark's estimate over its own shortest-path tree and may differ from the dominator tree.
+
+### Merged paths by class
+Sankey of the shortest paths (BFS from the GC roots) to the instances of the 5 biggest classes and the `--leak-class`
+classes, merged by class like MAT's "merge shortest paths". Up to 10,000 instances and 8 hops per class.
+
+### Aggregated retained
+ClassLoader → package → class sunburst; static fields whose value is dominated by the class itself (static caches and
+singletons); and, for the 10 biggest classes, the class of each instance's immediate dominator ("who holds X").
+
+### Concurrency
+Thread state from the `threadStatus` field (the hprof has no monitors), `ThreadPoolExecutor` (core, max, threads,
+queue type and size), `ForkJoinPool`, `Timer`, virtual threads and their continuations' retained size, classes of
+`ThreadLocal` values, identical stacks grouped, and a sunburst of frames from the top of the stack. The thread table
+gained state, locals retained, `ThreadLocal` retained and count, and stale entries (key collected).
+
 ### Memory waste
 - **Collections**: `ArrayList`, `Vector`, `HashMap`, `LinkedHashMap`, `WeakHashMap`, `Hashtable`, `ConcurrentHashMap`
   and `ArrayDeque` (exact classes only; `HashSet` shows up as its inner `HashMap`). Per type: empty ones with an
@@ -264,6 +286,10 @@ Key groups: `cli.*` (usage and errors), `log.*` (progress), `report.*`, `section
 | `src/main/kotlin/Analyzer.kt` | Opens the dump with Shark and builds the `HeapReport` data model. |
 | `src/main/kotlin/Dominators.kt` | Dominator tree algorithm. |
 | `src/main/kotlin/Waste.kt`, `References.kt`, `OffHeap.kt` | Collectors called from the single pass; one report section each. |
+| `src/main/kotlin/Leaks.kt` | Per-suspect paths and leak detection (JVM rules, library patterns). |
+| `src/main/kotlin/Paths.kt` | BFS tree from the GC roots and merged paths by class. |
+| `src/main/kotlin/Retained.kt` | Retained by ClassLoader, static fields and immediate dominators by class. |
+| `src/main/kotlin/Threads.kt` | Threads, pools, virtual threads, ThreadLocals, grouped stacks. |
 | `src/main/kotlin/Health.kt` | Health panel rules (a pure function over `HeapReport`). |
 | `src/main/kotlin/Snapshot.kt` | JSON snapshot with the full histogram (`--format json`). |
 | `src/main/kotlin/Reports.kt` | Markdown and HTML generation. |
