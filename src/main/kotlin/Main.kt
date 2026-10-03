@@ -26,6 +26,7 @@ fun main(args: Array<String>) {
     var formats = setOf("html", "md")
     var top = 50
     var retained = true
+    var redact = true
     var leakClasses = emptySet<String>()
     var appPackages = emptySet<String>()
     var baselines = emptyList<File>()
@@ -37,6 +38,7 @@ fun main(args: Array<String>) {
             "--format" -> formats = value(a).split(',').map { f -> f.trim().lowercase() }.toSet()
             "--top" -> top = value(a).toIntOrNull()?.takeIf { n -> n > 0 } ?: fail(msg["cli.topInvalid"])
             "--no-retained" -> retained = false
+            "--no-redact" -> redact = false
             "--leak-class" -> leakClasses = value(a).split(',').map(String::trim).filter(String::isNotEmpty).toSet()
             "--app-package" -> appPackages = value(a).split(',').map { p -> p.trim().removeSuffix(".") }.filter(String::isNotEmpty).toSet()
             "--baseline" -> baselines = value(a).split(',').map(String::trim).filter(String::isNotEmpty).map(::File)
@@ -54,7 +56,7 @@ fun main(args: Array<String>) {
     }
 
     System.err.println(NAME_VERSION)
-    val report = analyze(file, Options(top, retained, leakClasses, appPackages, msg)).let { r ->
+    val report = analyze(file, Options(top, retained, leakClasses, appPackages, redact, msg)).let { r ->
         if (snapshots.isEmpty()) r
         else r.copy(diff = diff(toSnapshot(r), snapshots, top)).let { it.copy(health = health(it)) }
     }

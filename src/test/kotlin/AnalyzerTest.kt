@@ -120,6 +120,7 @@ class AnalyzerTest {
         val pool = java.util.concurrent.Executors.newFixedThreadPool(3)
         repeat(23) { pool.execute { gate.await() } } // 3 running (identical stacks), 20 queued
         val threadLocal = ThreadLocal<ByteArray>().apply { set(ByteArray(1024)) }
+        val liveErrors = List(3) { IllegalStateException("live") } // held by a stack frame: not pre-allocated
         val dump = File.createTempFile("self", ".hprof").also { it.delete() }
         try {
             ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean::class.java).dumpHeap(dump.path, true)
@@ -209,8 +210,13 @@ class AnalyzerTest {
             val caches = report.inspections.first { it.key == "fw.caches" }
             assertTrue(caches.tables.single().rows.any { it[1] == "hprof.Holder.cache" && it[2] == "200" }, "caches: ${caches.tables}")
             val throwables = report.inspections.first { it.key == "fw.throwables" }
-            assertTrue(throwables.tables.single().rows.any { it[0] == "java.lang.RuntimeException" && it[1] == "boom" && it[2]!!.toInt() >= 5 },
-                "throwables: ${throwables.tables.single().rows.take(5)}")
+            val (inUse, pre) = throwables.tables
+            assertTrue(inUse.rows.any { it[0] == "java.lang.IllegalStateException" && it[1] == "live" && it[2]!!.toInt() >= 3 },
+                "throwables: ${inUse.rows.take(5)}")
+            // only reachable through a static field: treated as a constant
+            assertTrue(pre.collapsed && pre.rows.any { it[0] == "java.lang.RuntimeException" && it[1] == "boom" && it[2]!!.toInt() >= 5 },
+                "pre-allocated: ${pre.rows.take(5)}")
+            assertEquals(3, liveErrors.size)
             val g = report.graph!!
             assertTrue(g.fanIn.isNotEmpty() && g.depths.isNotEmpty() && g.classEdges.isNotEmpty())
             assertTrue(g.fanOut.first().degree >= 1000, "fan-out: ${g.fanOut.take(3)}")
@@ -328,5 +334,51 @@ class AnalyzerTest {
         assertEquals(listOf(CRITICAL to "bigDominator", CRITICAL to "finalizerQueue", WARNING to "lowFill",
             WARNING to "webappLoaders", WARNING to "dupStrings", INFO to "emptyCollections"), keys)
         assertEquals(listOf("40", "a.Big"), health(sick).first().args)
+
+        fun pool(cls: String, unbounded: Boolean) = PoolStat("ThreadPoolExecutor", cls, "0x1", 1, Int.MAX_VALUE, 1, null, 0, 0, unbounded)
+        val runtime = ok.copy(
+            offHeap = OffHeapReport(DirectStat(1, 2000, 0, 0, 0, 0), null, emptyList()),
+            concurrency = ConcurrencyReport(emptyList(), emptyList(), 0, null, emptyList(), emptyList(), null,
+                poolsByClass = listOf(NamedCount("a.Pool", 12), NamedCount("b.Pool", 2)), unboundedPools = 3),
+        )
+        assertEquals(listOf(WARNING to "offHeapLarge", WARNING to "poolProliferation", INFO to "unboundedPools"),
+            health(runtime).map { it.severity to it.key })
+        assertEquals(listOf("12", "a.Pool"), health(runtime)[1].args)
+    }
+
+    @Test
+    fun vmThreadsAreNotLeaks() {
+        listOf("C2 CompilerThread1", "C1 CompilerThread0", "Sweeper thread", "Attach Listener").forEach { assertTrue(VM_THREAD.matches(it), it) }
+        listOf("main", "pool-1-thread-1", "C2 CompilerThread1-app").forEach { assertTrue(!VM_THREAD.matches(it), it) }
+        assertEquals("da39a3ee5e6b4b0d3255bfef95601890afd80709", EMPTY_SIGNATURE)
+    }
+
+    @Test
+    fun redaction() {
+        val props = redactProps(mapOf(
+            "user.home" to "/home/ana", "java.version" to "21", "db.password" to "s3cret", "api.token" to "t",
+            "sun.java.command" to "com.acme.Main --user ana --pass x", "java.class.path" to "/opt/app.jar",
+        ))
+        assertEquals(REDACTED, props["user.home"])
+        assertEquals("21", props["java.version"])
+        assertEquals(REDACTED, props["db.password"])
+        assertEquals(REDACTED, props["api.token"])
+        assertEquals("com.acme.Main $REDACTED", props["sun.java.command"])
+        assertEquals(REDACTED, props["java.class.path"])
+        assertEquals(listOf("-Xmx2g", "-Ddb.password=$REDACTED", "-Dfile.encoding=UTF-8"),
+            redactArgs(listOf("-Xmx2g", "-Ddb.password=s3cret", "-Dfile.encoding=UTF-8")))
+    }
+
+    @Test
+    fun sizeModel() {
+        val compressed = SizeModel.of(8, mapOf("java.vm.compressedOopsMode" to "Zero based"))
+        assertEquals(4, compressed.refSize)
+        assertEquals(8, SizeModel.of(8, emptyMap()).refSize)
+        // 2 refs + 1 int in the hprof = 20 B; JVM: 12 header + 2*4 + 4 = 24
+        assertEquals(24L, compressed.instance(20, 2))
+        assertEquals(16L, compressed.instance(0, 0))           // empty object: 12 aligned to 16
+        assertEquals(56L, compressed.objectArray(10))          // 16 + 10*4
+        assertEquals(24L, compressed.primitiveArray(5))        // 16 + 5 -> 24
+        assertEquals(96L, SizeModel.of(8, emptyMap()).objectArray(10)) // 16 + 10*8
     }
 }

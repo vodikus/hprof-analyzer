@@ -67,6 +67,7 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [opções]
 | `--format html,md` | `html,md` | Lista de formatos separados por vírgula. `json` grava `<dump>.snapshot.json` com o histograma completo (base para comparar dumps). |
 | `--top <n>` | `50` | Linhas em cada tabela (classes, objetos, strings, arrays). |
 | `--no-retained` | desligado | Pula a dominator tree. Cerca de 2× mais rápido e usa menos memória, mas ficam vazios os retained sizes, o treemap e a seção de maiores objetos, e os caminhos até GC root só são calculados para `--leak-class`. |
+| `--no-redact` | desligado | Por padrão o relatório mascara `user.name`, `user.home`, `user.dir`, class/module/library path, os argumentos de `sun.java.command` (fica só o 1º token) e propriedades ou `-Dchave=valor` cuja chave contém `pass`, `secret`, `token`, `credential`, `auth` ou `key`. Esta opção mostra tudo. |
 | `--leak-class a.B,c.D` | — | Nomes completos de classes. Até 20 instâncias dessas classes ganham caminho até GC root, além dos 10 maiores objetos. |
 | `--app-package a.b,c.d` | automático | Pacotes da aplicação para o relatório extra `<dump>-app.html`/`.md` (só classes da aplicação). Sem a opção, usa o pacote da main class (`sun.java.command`) ou, se for um jar/launcher, tudo fora de JDK, linguagem e frameworks/bibliotecas conhecidos. |
 | `--baseline a.json,b.json` | — | Snapshots de dumps anteriores (gerados com `--format json`). O relatório ganha a seção de comparação entre dumps. |
@@ -94,8 +95,31 @@ java -Xmx4g -jar hprof-analyzer-all.jar app.hprof --leak-class com.acme.SessionC
 
 ## 5. Lendo o relatório
 
-O relatório HTML tem um menu lateral com uma entrada por seção. As tabelas são ordenáveis clicando no cabeçalho da
-coluna. Os gráficos mostram o valor exato ao passar o mouse.
+As seções ficam em seis camadas, da conclusão para a evidência (mesma ordem no HTML e no Markdown):
+
+| Camada | Seções |
+| --- | --- |
+| Diagnóstico | Painel de saúde, Avisos, Resumo, Comparação entre dumps |
+| Onde está a memória | Dominator tree, Retained agregado, Maiores objetos, Histograma, Pacotes, Off-heap |
+| Por que está retida | Suspeitas de leak, Caminhos agregados, Caminhos até GC roots, Referências |
+| Desperdício | Desperdício de memória (com boxing), Strings duplicadas, Maiores arrays |
+| Runtime | Threads (com stack traces), Concorrência, Frameworks |
+| Apêndice técnico | Ambiente JVM, Classes geradas, ClassLoaders, GC roots, Grafo, Metadados |
+
+No HTML:
+- **Menu lateral** agrupado por camada, com **busca global**: o termo filtra todas as tabelas e esmaece as seções sem
+  resultado.
+- **Tabelas** ordenáveis pelo cabeçalho, com filtro próprio e botão **CSV** (exporta as linhas visíveis).
+- **IDs de objeto clicáveis** (`0x…`): abrem um painel com classe, shallow, retained, dominador imediato, campos e o
+  caminho até o GC root. Os ids dentro do painel também são clicáveis.
+- **Âncoras persistentes**: `#leaks/2`, `#paths/3`, `#merged/1`, `#retained/2` (seletores) e `#obj/0x…` (painel)
+  reabrem o mesmo ponto; o endereço muda ao trocar o seletor, pronto para colar num ticket.
+- **Cor por origem** nos gráficos de classes, pacotes, campos estáticos, dominadores e pools: aplicação, framework/
+  biblioteca, JDK e gerado em runtime, sempre com as mesmas cores e legenda.
+- **Achados benignos** (`ZipFile$Source` do classpath, caches de `Locale`/`MethodType`, threads internas da JVM)
+  aparecem esmaecidos, no fim da tabela, com o motivo no tooltip. No Markdown, recebem o sufixo "(benigno: motivo)".
+- **Renderização sob demanda**: cada gráfico é desenhado quando chega perto da tela; stack traces são montados ao
+  abrir.
 
 ### Resumo
 Versão do hprof, tamanho de identificador (4 ou 8 bytes), data/hora do dump (UTC), contagem de objetos, classes,
@@ -135,7 +159,8 @@ As cores dos nós vêm dos `ObjectInspectors` do Shark para o JDK:
 | Status | Significado |
 | --- | --- |
 | `NOT_LEAKING` (verde) | O Shark sabe que é esperado que o objeto esteja vivo (por exemplo, uma thread ativa ou um class loader). |
-| `LEAKING` (vermelho) | O próprio suspeito, ou um objeto que o Shark sabe que já deveria ter sido coletado. |
+| `LEAKING` (vermelho) | Um objeto que o Shark sabe que já deveria ter sido coletado. |
+| `ALVO` (azul) | O objeto escolhido (maior retained ou `--leak-class`): é o fim do caminho, não um vazamento comprovado. |
 | `UNKNOWN` (cinza) | Nenhuma regra se aplica. |
 
 Para achar um vazamento, procure a primeira referência do caminho que não deveria existir: em geral um campo
@@ -182,7 +207,9 @@ dumps (a partir de 3) e quando o heap cresce mais de 20%.
 Primeira seção do relatório completo. Regras automáticas com severidade (crítico, alerta, info) e link para a seção:
 um objeto retendo mais de 30% do heap alcançável, fila do Finalizer acima de 10 mil, coleções grandes com fill ratio
 médio abaixo de 25%, 2 ou mais ClassLoaders de webapp (Tomcat/Jetty), strings duplicadas acima de 10% do heap, grupos
-de proxies suspeitos e coleções vazias com array alocado acima de 5% do heap. Os limiares ficam em `Health.kt`.
+de proxies suspeitos, coleções vazias com array alocado acima de 5% do heap, off-heap (`DirectByteBuffer`) maior que o
+heap alcançável, 10 ou mais pools da mesma classe e pools com `max = Integer.MAX_VALUE` e fila ilimitada. Os limiares
+ficam em `Health.kt`.
 
 ### Suspeitas de leak
 Uma única análise do Shark (`FilteringLeakingObjectFinder`) com regras de JVM: thread terminada ainda referenciada,
@@ -191,7 +218,9 @@ ClassLoader de webapp do Tomcat parado (`STOPPED`/`DESTROYED`), sessão HTTP inv
 pela assinatura do Shark (N ocorrências do mesmo padrão). Caminhos que passam por referências conhecidas do JDK
 (`Thread.contextClassLoader`, valor de `ThreadLocal`, `DriverManager.registeredDrivers`, shutdown hooks) viram
 "biblioteca". O retained de cada grupo é a estimativa do Shark, calculada sobre a árvore de menores caminhos dele, e
-pode diferir da dominator tree.
+pode diferir da dominator tree. Threads internas da JVM (`C1/C2 CompilerThread*`, `Service Thread` etc.) não contam
+como thread terminada: a JVM as recria e o objeto fica preso por referência nativa. Caminhos sem referência suspeita
+(o Shark daria a todos a mesma assinatura, o SHA-1 de `""`) são agrupados por classe do objeto + tipo do GC root.
 
 ### Caminhos agregados por classe
 Sankey dos menores caminhos (BFS a partir dos GC roots) até as instâncias das 5 maiores classes e das classes de
@@ -216,7 +245,10 @@ Inspetores que só aparecem quando as classes estão no dump, lendo campos inter
 - **JDBC**: pools HikariCP e DBCP2 (conexões, ociosas, ativas) e quantidade de `Statement`/`ResultSet` dos drivers.
 - **Caches**: Caffeine, Guava, Ehcache e mapas estáticos com 100 ou mais entradas.
 - **Jackson**: quantidade de `ObjectMapper` (muitos indicam criação por requisição).
-- **Exceções retidas**: `Throwable` agrupados por tipo e mensagem, com retained (inclui o `backtrace`).
+- **Exceções retidas**: `Throwable` agrupados por tipo e mensagem, com retained (inclui o `backtrace`). As
+  pré-alocadas (o menor caminho passa por campo estático ou começa num GC root que não é de thread, como os
+  `OutOfMemoryError` que a JVM cria na inicialização ou constantes do H2) ficam numa tabela à parte, recolhida. Uma
+  exceção da aplicação guardada em campo estático também cai nessa tabela.
 
 Versões muito diferentes das bibliotecas podem deixar valores em branco; uma falha num inspetor vira aviso e não
 derruba os outros.
@@ -254,7 +286,8 @@ alcançáveis por weak/soft refs.
 ### Memória off-heap (estimada)
 O dump não contém memória nativa; ela é estimada pelos objetos Java: capacidade de `DirectByteBuffer` (donos, views
 e mapeados), `PoolChunk` do Netty, e contagem de descritores, streams, sockets, `ZipFile`, `Inflater`/`Deflater`
-(com "abertos" quando a classe tem campo `closed`/`fd`).
+(com "abertos" quando a classe tem campo `closed`/`fd`). Views (`slice()`, `duplicate()`) compartilham a memória do
+buffer dono e não devem ser somadas: um `duplicate()` de um buffer grande tem a mesma capacidade que ele.
 
 ## 6. Conceitos
 
@@ -273,9 +306,14 @@ estáticos (por meio da sua classe), referências JNI, monitores em uso etc.
 analisador as ignora. Objetos alcançáveis só por elas (por exemplo, caches baseados em `SoftReference`) contam como
 inalcançáveis e não entram em nenhum retained size.
 
-**Convenção de tamanhos**: os tamanhos são os bytes gravados nos registros do hprof (valores dos campos e elementos
-dos arrays), sem header de objeto nem padding de alinhamento. São menores que os do Eclipse MAT ou do VisualVM, mas as
-comparações entre objetos e classes continuam válidas.
+**Convenção de tamanhos**: os tamanhos são estimados como a JVM HotSpot 64-bit aloca: header de 12 bytes (arrays 16),
+alinhamento de 8 bytes e referências de 4 bytes quando compressed oops está ativo (detectado por
+`java.vm.compressedOopsMode`; senão 8). O hprof grava toda referência com 8 bytes e sem header, o que superestimava
+objetos cheios de referências. O modelo usado aparece no resumo. Snapshots de versões anteriores usavam os bytes crus do
+hprof; a comparação entre dumps avisa quando os modelos diferem.
+
+**Retained não é somável**: o retained de um pacote ou classe inclui objetos de outros pacotes e classes que ele
+domina, então os valores se sobrepõem. As colunas marcadas "(sobrepõe)" não devem ser somadas.
 
 ## 7. Desempenho e memória
 
@@ -376,7 +414,8 @@ Notas de implementação:
 
 ## 10. Limitações
 
-- Os tamanhos não incluem o header dos objetos (veja a [seção 6](#6-conceitos)).
+- Os tamanhos são estimativas para HotSpot 64-bit com compressed class pointers e alinhamento de 8 bytes (veja a
+  [seção 6](#6-conceitos)); `-XX:-UseCompressedClassPointers` ou `ObjectAlignmentInBytes` diferente não são detectados.
 - Só dumps do HotSpot/OpenJDK foram testados. Dumps de Android são lidos pelo Shark, mas não foram testados.
 - Os suspeitos são escolhidos pelo tamanho. A ferramenta não decide sozinha se algo é vazamento; quem mostra isso é o
   caminho até o GC root.

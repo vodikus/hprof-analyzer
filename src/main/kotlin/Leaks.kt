@@ -22,6 +22,7 @@ import shark.ReferenceMatcher
 import shark.ReferencePattern.InstanceFieldPattern
 import shark.ReferencePattern.StaticFieldPattern
 import java.io.File
+import java.security.MessageDigest
 
 /** Leaking objects found by JVM rules (and --leak-class), grouped by Shark's leak signature. */
 @Serializable
@@ -41,9 +42,17 @@ private class JvmLeak(val className: String, val reason: String, val test: (Heap
 
 private fun HeapInstance.closed() = field("closed")?.asBoolean == true
 
+// ponytail: JIT compiler threads are stopped/recreated by the JVM (UseDynamicNumberOfCompilerThreads) and stay held by a
+// JNI global; matched by name because the filter runs before any path exists. Extend if other VM threads show up.
+internal val VM_THREAD = Regex(
+    "C[12] CompilerThread\\d+|JVMCI.*CompilerThread\\d*|Sweeper thread|Service Thread|Monitor Deflation Thread|" +
+        "Notification Thread|Signal Dispatcher|Attach Listener"
+)
+
 private val JVM_LEAKS = listOf(
     JvmLeak("java.lang.Thread", "Thread terminated but still referenced") {
-        ((it.threadField("threadStatus")?.asInt ?: 0) and 0x2) != 0
+        ((it.threadField("threadStatus")?.asInt ?: 0) and 0x2) != 0 &&
+            it.threadField("name")?.readAsJavaString()?.let(VM_THREAD::matches) != true
     },
     JvmLeak("org.apache.catalina.loader.WebappClassLoaderBase", "Tomcat webapp ClassLoader stopped but still referenced") {
         it.refField("state")?.asInstance?.get("java.lang.Enum", "name")?.value?.readAsJavaString() in setOf("STOPPED", "DESTROYED")
@@ -70,7 +79,8 @@ private val LIBRARY_LEAKS: List<ReferenceMatcher> = listOf(
 
 private val IGNORED_REFERENT = IgnoredReferenceMatcher(InstanceFieldPattern("java.lang.ref.Reference", "referent"))
 
-internal fun toLeakPath(trace: LeakTrace, title: String): LeakPath {
+/** [target]: the last node is a chosen object (biggest retained), not a proven leak: status TARGET instead of LEAKING. */
+internal fun toLeakPath(trace: LeakTrace, title: String, target: Boolean = false): LeakPath {
     val objects = trace.referencePath.map { it.originObject } + trace.leakingObject
     val refs = listOf<String?>(null) + trace.referencePath.map { ref ->
         val static = if (ref.referenceType == ReferenceType.STATIC_FIELD) "static " else ""
@@ -80,7 +90,8 @@ internal fun toLeakPath(trace: LeakTrace, title: String): LeakPath {
         title = title,
         gcRoot = trace.gcRootType.description,
         nodes = objects.mapIndexed { i, o ->
-            PathNode(o.className, o.typeName, o.leakingStatus.name, o.leakingStatusReason, o.labels.toList(), refs[i])
+            if (target && i == objects.lastIndex) PathNode(o.className, o.typeName, "TARGET", "", o.labels.toList(), refs[i])
+            else PathNode(o.className, o.typeName, o.leakingStatus.name, o.leakingStatusReason, o.labels.toList(), refs[i])
         },
     )
 }
@@ -110,16 +121,31 @@ internal fun leakSuspects(file: File, graph: HeapGraph, leakClasses: Set<String>
         objectInspectors = ObjectInspectors.jdkDefaults + inspector,
     )
     if (analysis is HeapAnalysisFailure) throw analysis.exception
-    val groups = (analysis as HeapAnalysisSuccess).allLeaks.map { leak ->
-        val trace = leak.leakTraces.first()
-        LeakGroup(
-            kind = if (leak is LibraryLeak) "library" else "application",
-            description = if (leak is LibraryLeak) leak.description else trace.leakingObject.leakingStatusReason,
-            signature = leak.signature,
-            occurrences = leak.leakTraces.size,
-            retained = leak.totalRetainedHeapByteSize?.toLong(),
-            trace = toLeakPath(trace, leak.shortDescription),
-        )
+    val groups = (analysis as HeapAnalysisSuccess).allLeaks.flatMap { leak ->
+        val kind = if (leak is LibraryLeak) "library" else "application"
+        if (leak.signature != EMPTY_SIGNATURE) {
+            val trace = leak.leakTraces.first()
+            return@flatMap sequenceOf(LeakGroup(
+                kind = kind,
+                description = if (leak is LibraryLeak) leak.description else trace.leakingObject.leakingStatusReason,
+                signature = leak.signature,
+                occurrences = leak.leakTraces.size,
+                retained = leak.totalRetainedHeapByteSize?.toLong(),
+                trace = toLeakPath(trace, leak.shortDescription),
+            ))
+        }
+        // no suspect reference in the trace: Shark hashes "" and lumps unrelated leaks together
+        leak.leakTraces.groupBy { "${it.leakingObject.className}|${it.gcRootType.name}" }.map { (key, traces) ->
+            val trace = traces.first()
+            LeakGroup(
+                kind = kind,
+                description = trace.leakingObject.leakingStatusReason,
+                signature = sha1(key),
+                occurrences = traces.size,
+                retained = traces.mapNotNull { it.leakingObject.retainedHeapByteSize?.toLong() }.ifEmpty { null }?.sum(),
+                trace = toLeakPath(trace, "${trace.leakingObject.classSimpleName} (${trace.gcRootType.description})"),
+            )
+        }.asSequence()
     }.sortedWith(compareByDescending<LeakGroup> { it.retained ?: 0 }.thenByDescending { it.occurrences }).take(top).toList()
     return LeakReport(leaking, groups)
 }
@@ -154,6 +180,12 @@ internal fun findPaths(
             return@flatMap emptyList()
         }
         (analysis as HeapAnalysisSuccess).allLeaks.flatMap { it.leakTraces }
-            .map { toLeakPath(it, "${it.leakingObject.className} @${hex(id)}") }.toList()
+            .map { toLeakPath(it, "${it.leakingObject.className} @${hex(id)}", target = true) }.toList()
     }
 }
+
+internal fun sha1(s: String): String =
+    MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
+
+/** SHA-1 of "": Shark's signature for a trace without suspect references. */
+internal val EMPTY_SIGNATURE = sha1("")

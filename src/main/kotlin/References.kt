@@ -31,7 +31,7 @@ private val REF_KINDS = listOf(
 
 private val CLEANERS = setOf("jdk.internal.ref.Cleaner", "sun.misc.Cleaner", "jdk.internal.ref.CleanerImpl\$PhantomCleanableRef")
 
-internal class RefCollector(private val graph: HeapGraph) : Collector() {
+internal class RefCollector(private val graph: HeapGraph, private val sizeOf: SizeOf) : Collector() {
     /** Kind per instance class id; "" = not a Reference. */
     private val kindByClass = HashMap<Long, String>()
     private class KindAcc { var count = 0L; var withReferent = 0L; var referentBytes = 0L }
@@ -53,7 +53,7 @@ internal class RefCollector(private val graph: HeapGraph) : Collector() {
             ?.value?.asNonNullObjectId ?: return@safe
         val referent = graph.findObjectByIdOrNull(id) ?: return@safe
         acc.withReferent++
-        acc.referentBytes += referent.shallowSize()
+        acc.referentBytes += sizeOf(referent)
         if (name == "java.lang.ref.Finalizer") finalizable.merge(referent.className(), 1, Int::plus)
     }
 

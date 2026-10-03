@@ -12,6 +12,8 @@ data class DiffReport(
     val packages: List<Delta>,
     /** Elements of the collections reached by the same path (see [pathSignature]). */
     val collections: List<Delta>,
+    /** Some dump was measured with another size model (e.g. a snapshot from a version with raw hprof sizes). */
+    val mixedSizes: Boolean = false,
 )
 
 @Serializable
@@ -43,5 +45,6 @@ internal fun diff(current: Snapshot, baselines: List<Snapshot>, top: Int): DiffR
         classes = deltas({ it.classes }, { it.name }, { it.shallow }, { it.count }),
         packages = deltas({ it.packages }, { it.name }, { it.shallow }, { it.count }),
         collections = deltas({ it.collections }, { it.signature }, { it.size }, { it.count.toLong() }),
+        mixedSizes = all.map { it.summary.refSize }.distinct().size > 1,
     )
 }

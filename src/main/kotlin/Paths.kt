@@ -2,6 +2,7 @@ package hprof
 
 import kotlinx.serialization.Serializable
 import shark.HeapObject
+import shark.ValueHolder
 
 /**
  * Shortest paths from the GC roots to every instance of a class, merged by class (like MAT's "merge shortest paths").
@@ -114,6 +115,92 @@ private fun edgeName(h: Heap, p: Int, childId: Long): String = when (val o = h.g
         ?.let { "${o.simpleName}.${it.name}" } ?: o.simpleName
     is HeapObject.HeapObjectArray -> o.arrayClassName.substringAfterLast('.')
     is HeapObject.HeapPrimitiveArray -> o.arrayClassName
+}
+
+/** Detail panel of an object cited in the report. [path]: GC root first, by the BFS shortest path; empty if unreachable. */
+@Serializable
+data class ObjectDetail(
+    val className: String, val shallow: Long, val retained: Long?,
+    /** Immediate dominator: null id = the GC roots. */
+    val dominator: String?, val dominatorClass: String?,
+    val fields: List<FieldValue>, val length: Int? = null,
+    val rootType: String?, val path: List<PathStep>,
+)
+
+/** [ref]: id of the referenced object. */
+@Serializable
+data class FieldValue(val name: String, val value: String, val ref: String? = null)
+
+/** [via]: how the previous step references this one (null for the root). */
+@Serializable
+data class PathStep(val id: String, val label: String, val via: String?)
+
+// ponytail: fixed caps keep the embedded data small
+private const val MAX_DETAILS = 2000
+private const val MAX_FIELDS = 40
+private const val MAX_PATH = 20
+private const val MAX_VALUE = 80
+private val CITED_ID = Regex("0x[0-9a-f]{4,}")
+
+private fun valueText(h: Heap, v: shark.HeapValue): FieldValue? {
+    val text = when (val x = v.holder) {
+        is ValueHolder.ReferenceHolder -> {
+            if (x.isNull) return null
+            val o = h.graph.findObjectByIdOrNull(x.value)
+            val str = (o as? HeapObject.HeapInstance)?.takeIf { it.instanceClassName == "java.lang.String" }?.readAsJavaString()
+            return FieldValue("", str?.let { "\"${it.take(MAX_VALUE)}\"" } ?: o?.label() ?: "?", hex(x.value))
+        }
+        is ValueHolder.BooleanHolder -> x.value.toString()
+        is ValueHolder.CharHolder -> "'${x.value}'"
+        is ValueHolder.ByteHolder -> x.value.toString()
+        is ValueHolder.ShortHolder -> x.value.toString()
+        is ValueHolder.IntHolder -> x.value.toString()
+        is ValueHolder.LongHolder -> x.value.toString()
+        is ValueHolder.FloatHolder -> x.value.toString()
+        is ValueHolder.DoubleHolder -> x.value.toString()
+    }
+    return FieldValue("", text)
+}
+
+/** Details of every object id cited in [json] (the serialized report). */
+internal fun objectDetails(h: Heap, parent: IntArray, rootTypes: Map<Int, String>, shallow: LongArray, json: String): Map<String, ObjectDetail> {
+    val out = LinkedHashMap<String, ObjectDetail>()
+    for (m in CITED_ID.findAll(json)) {
+        if (out.size >= MAX_DETAILS) break
+        val key = m.value
+        if (key in out) continue
+        val o = key.removePrefix("0x").toLongOrNull(16)?.let { h.graph.findObjectByIdOrNull(it) } ?: continue
+        val v = h.graph.indexOf(o)
+        val fields = when (o) {
+            is HeapObject.HeapInstance -> o.readFields().mapNotNull { f -> valueText(h, f.value)?.copy(name = f.name) }.take(MAX_FIELDS).toList()
+            is HeapObject.HeapClass -> o.readStaticFields().mapNotNull { f -> valueText(h, f.value)?.copy(name = "static " + f.name) }.take(MAX_FIELDS).toList()
+            is HeapObject.HeapObjectArray -> o.readElements().mapIndexedNotNull { i, e -> valueText(h, e)?.copy(name = "[$i]") }.take(MAX_FIELDS).toList()
+            is HeapObject.HeapPrimitiveArray -> emptyList()
+        }
+        val length = when (o) {
+            is HeapObject.HeapObjectArray -> o.byteSize / h.graph.identifierByteSize
+            is HeapObject.HeapPrimitiveArray -> o.byteSize / o.primitiveType.byteSize
+            else -> null
+        }
+        val idom = h.dom?.idom?.get(v)
+        val steps = ArrayList<PathStep>()
+        var cur = v
+        var rootType: String? = null
+        while (parent[cur] >= 0) {
+            val p = parent[cur]
+            if (steps.size >= MAX_PATH) { steps.add(PathStep("", "…", null)); break }
+            steps.add(PathStep(hex(h.ids[cur]), h.label(cur), if (p == h.n) null else edgeName(h, p, h.ids[cur])))
+            if (p == h.n) { rootType = rootTypes[cur] ?: "GC root"; break }
+            cur = p
+        }
+        out[key] = ObjectDetail(
+            className = o.label(), shallow = shallow[v], retained = h.retained?.get(v),
+            dominator = idom?.takeIf { it != h.n && it >= 0 }?.let { hex(h.ids[it]) },
+            dominatorClass = idom?.let { if (it == h.n) GC_ROOT_LABEL else if (it >= 0) h.label(it) else null },
+            fields = fields, length = length, rootType = rootType, path = steps.reversed(),
+        )
+    }
+    return out
 }
 
 /** The [big] collections (index, size) grouped by path signature. */

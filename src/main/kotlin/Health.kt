@@ -22,6 +22,7 @@ private const val HEAP_GROWTH = 0.20
 private const val WEBAPP_LOADERS = 2
 private const val DUP_STRINGS = 0.10
 private const val EMPTY_COLLECTIONS = 0.05
+private const val POOLS_PER_CLASS = 10
 
 private val WEBAPP_LOADER_NAMES = listOf("WebappClassLoader", "org.eclipse.jetty.webapp.WebAppClassLoader")
 
@@ -38,6 +39,11 @@ internal fun health(r: HeapReport): List<HealthFinding> = buildList {
     }
     r.references?.finalizerQueue?.let { if (it > FINALIZER_QUEUE) add(CRITICAL, "finalizerQueue", "references", it) }
     r.concurrency?.pools?.filter { (it.queued ?: 0) > POOL_QUEUE }?.forEach { add(CRITICAL, "poolQueue", "concurrency", it.className, it.queued!!) }
+    r.offHeap?.direct?.ownerBytes?.let { direct ->
+        if (s.reachableBytes != null && direct > s.reachableBytes) add(WARNING, "offHeapLarge", "offheap", bytes(direct), bytes(s.reachableBytes))
+    }
+    r.concurrency?.poolsByClass?.filter { it.count >= POOLS_PER_CLASS }?.forEach { add(WARNING, "poolProliferation", "concurrency", it.count, it.name) }
+    r.concurrency?.unboundedPools?.let { if (it > 0) add(INFO, "unboundedPools", "concurrency", it) }
     r.diff?.let { d ->
         // with only two dumps any growth looks monotonic: require 3+
         val growing = d.collections.count { it.growing }

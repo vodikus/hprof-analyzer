@@ -60,7 +60,7 @@ data class NullFieldClass(val className: String, val instances: Long, val fields
 @Serializable
 data class FieldNull(val name: String, val nullPct: Double)
 
-/** Estimated: hprof sizes have no object header nor alignment (see [OBJ_HEADER]). */
+/** Split of the shallow sizes (see [SizeModel]): field/element bytes, object headers, alignment padding. */
 @Serializable
 data class Overhead(val data: Long, val header: Long, val padding: Long)
 
@@ -72,12 +72,6 @@ data class StringStats(
 
 @Serializable
 data class PrefixStat(val prefix: String, val count: Long, val bytes: Long)
-
-// ponytail: 64-bit HotSpot with compressed class pointers (default): 12 B instance header, 16 B array header,
-// 8 B alignment. Wrong for 32-bit JVMs or -XX:-UseCompressedClassPointers; make it a flag if that matters.
-private const val OBJ_HEADER = 12
-private const val ARRAY_HEADER = 16
-private const val ALIGN = 8
 
 // ponytail: fixed thresholds, CLI flags if real dumps need tuning
 private const val MIN_SCAN_BYTES = 64   // primitive arrays smaller than this are not read
@@ -129,8 +123,9 @@ private fun HeapField.isReference() = value.holder is ValueHolder.ReferenceHolde
 
 internal fun List<HeapField>.named(name: String) = firstOrNull { it.name == name }?.value
 
-internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector() {
+internal class WasteCollector(private val graph: HeapGraph, n: Int, private val sizeOf: SizeOf) : Collector() {
     private val idSize = graph.identifierByteSize
+    private val refSize = sizeOf.model.refSize
 
     private class CollAcc { var count = 0L; var empty = 0L; var emptyBytes = 0L; var size = 0L; var capacity = 0L }
     private val collections = HashMap<String, CollAcc>()
@@ -159,13 +154,13 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
     /** Backing arrays of Strings: already covered by duplicate strings, skipped by the array scan. */
     private val isStringValue = BooleanArray(n)
 
-    private fun overhead(size: Long, head: Int) {
-        val pad = (ALIGN - (head + size) % ALIGN) % ALIGN
-        data += size; header += head; padding += pad
+    /** [shallow] from the size model, [payload] its field/element bytes. */
+    private fun overhead(shallow: Long, head: Int, payload: Long) {
+        data += payload; header += head; padding += shallow - head - payload
     }
 
     fun instance(obj: HeapInstance, name: String, fields: List<HeapField>, size: Long) = safe {
-        overhead(size, OBJ_HEADER)
+        overhead(size, OBJ_HEADER, sizeOf.payload(obj))
         COLLECTIONS[name]?.let { collection(obj.objectIndex, name, it, fields) }
         if (name in BOXES) box(name, fields, size)
         nullFields(obj.instanceClassId, name, fields)
@@ -189,7 +184,7 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
             big.add(longArrayOf(size, idx.toLong()))
             if (big.size > BIG_COLLECTIONS) big.poll()
         }
-        if (size == 0L && capacity > 0) { acc.empty++; acc.emptyBytes += array!!.byteSize }
+        if (size == 0L && capacity > 0) { acc.empty++; acc.emptyBytes += sizeOf(array!!) }
         sizes[log2Bucket(size)]++
         if (capacity > 0) fill[if (size <= 0) 0 else Math.ceil(4.0 * size / capacity).toInt().coerceIn(1, 4)]++
     }
@@ -236,7 +231,7 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
     }
 
     fun objectArray(name: String, size: Long, length: Int, nullCount: Int) = safe {
-        overhead(size, ARRAY_HEADER)
+        overhead(size, ARRAY_HEADER, length.toLong() * refSize)
         val kind = when {
             length > 0 && nullCount == length -> "allNull"
             length >= SPARSE_MIN_LENGTH && nullCount * 10L >= length * 9L -> "sparse"
@@ -245,7 +240,7 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
         arrays.getOrPut(kind to name) { ArrAcc() }.let { it.count++; it.bytes += size }
     }
 
-    fun primitiveArray(size: Long) = safe { overhead(size, ARRAY_HEADER) }
+    fun primitiveArray(size: Long, byteSize: Int) = safe { overhead(size, ARRAY_HEADER, byteSize.toLong()) }
 
     private class DupAcc(val type: String, val length: Int, val bytes: Long) { var count = 0 }
 
@@ -254,9 +249,10 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
         checkOk()
         val dups = HashMap<Long, DupAcc>()
         for (a in graph.primitiveArrays) {
-            val bytes = a.byteSize.toLong()
-            if (bytes < MIN_SCAN_BYTES || isStringValue[a.objectIndex]) continue
-            val length = (bytes / a.primitiveType.byteSize).toInt()
+            val raw = a.byteSize.toLong()
+            if (raw < MIN_SCAN_BYTES || isStringValue[a.objectIndex]) continue
+            val length = (raw / a.primitiveType.byteSize).toInt()
+            val bytes = sizeOf.model.primitiveArray(a.byteSize)
             // ponytail: 64-bit FNV hash identifies content; a collision merges two arrays (vanishingly rare)
             val hash = scan(a.readRecord(), a.primitiveType.ordinal * -0x61c8864680b583ebL + length)
             if (lastZero) arrays.getOrPut("zero" to a.arrayClassName) { ArrAcc() }.let { it.count++; it.bytes += bytes }
@@ -272,7 +268,7 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
 
         return WasteReport(
             collections = collections.map { (name, a) ->
-                CollectionStat(name, a.count, a.empty, a.emptyBytes, a.size, a.capacity, (a.capacity - a.size).coerceAtLeast(0) * idSize)
+                CollectionStat(name, a.count, a.empty, a.emptyBytes, a.size, a.capacity, (a.capacity - a.size).coerceAtLeast(0) * refSize)
             }.sortedByDescending { it.unusedBytes },
             fillRatio = FILL_LABELS.mapIndexed { i, l -> Bucket(l, fill[i]) },
             sizes = buckets(sizes),
@@ -288,7 +284,7 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int) : Collector(
     }
 
     private fun nullFieldClasses(): List<NullFieldClass> {
-        fun wasted(a: NullAcc) = a.nulls.filter { it >= a.count * NULL_FIELD }.sum() * idSize
+        fun wasted(a: NullAcc) = a.nulls.filter { it >= a.count * NULL_FIELD }.sum() * refSize
         return topN(NULL_FIELD_CLASSES, nulls.values.asSequence().filter { it.count >= MIN_NULL_INSTANCES && wasted(it) > 0 }, ::wasted)
             .map { a -> NullFieldClass(a.name, a.count, a.fields.mapIndexed { i, f -> FieldNull(f, 100.0 * a.nulls[i] / a.count) }) }
     }

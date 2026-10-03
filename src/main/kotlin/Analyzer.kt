@@ -2,6 +2,7 @@ package hprof
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
+import kotlinx.serialization.json.Json
 import shark.HeapGraph
 import shark.HeapObject
 import shark.HeapObject.HeapClass
@@ -11,6 +12,7 @@ import shark.HeapObject.HeapPrimitiveArray
 import shark.HprofHeader
 import shark.HprofHeapGraph.Companion.openHeapGraph
 import shark.HprofRecordTag
+import shark.PrimitiveType
 import java.io.File
 import java.time.Instant
 import java.util.EnumSet
@@ -57,6 +59,14 @@ data class HeapReport(
     val metadata: DumpMetadata? = null,
     /** Set by `--baseline`: comparison with earlier snapshots. */
     val diff: DiffReport? = null,
+    /** JVM properties and arguments were masked (default; `--no-redact` turns it off). */
+    val redacted: Boolean = false,
+    val origins: Origins? = null,
+    /** See [BENIGN]; plus [vmThreads], the pattern of JVM-internal thread names. */
+    val benign: Map<String, String> = emptyMap(),
+    val vmThreads: String = "",
+    /** Detail of the objects cited in the report, by id (HTML panel). */
+    val objects: Map<String, ObjectDetail> = emptyMap(),
     /** Sections restricted to application classes; rendered as a separate report, not embedded. */
     @Transient val app: AppView? = null,
     /** Every class (not only the top N); written to the snapshot only. */
@@ -120,6 +130,8 @@ data class Summary(
     val reachableBytes: Long?,
     val analysisMillis: Long,
     val toolVersion: String,
+    /** Reference size of the size model (4 = compressed oops); null in snapshots from versions with raw hprof sizes. */
+    val refSize: Int? = null,
 )
 
 @Serializable
@@ -192,6 +204,8 @@ class Options(
     val leakClasses: Set<String> = emptySet(),
     /** Application package prefixes; empty = auto-detect (see [detectAppPrefixes]). */
     val appPackages: Set<String> = emptySet(),
+    /** Mask user/machine properties, program arguments and secret-looking values in the report. */
+    val redact: Boolean = true,
     val msg: Messages = Messages.load(),
     val log: (String) -> Unit = { System.err.println(it) },
 )
@@ -267,11 +281,50 @@ internal fun HeapObject.className(): String = when (this) {
 
 internal fun HeapObject.label(): String = if (this is HeapClass) "class $name" else className()
 
-internal fun HeapObject.shallowSize(): Long = when (this) {
-    is HeapClass -> recordSize.toLong()
-    is HeapInstance -> byteSize.toLong()
-    is HeapObjectArray -> byteSize.toLong()
-    is HeapPrimitiveArray -> byteSize.toLong()
+// ponytail: 64-bit HotSpot with compressed class pointers (default): 12 B instance header, 16 B array header, 8 B
+// alignment; references 4 B with compressed oops. Wrong for -XX:-UseCompressedClassPointers, ObjectAlignmentInBytes != 8
+// or 32-bit JVMs; make it a flag if that matters.
+internal const val OBJ_HEADER = 12
+internal const val ARRAY_HEADER = 16
+internal const val ALIGN = 8
+
+internal fun align(size: Long) = (size + ALIGN - 1) / ALIGN * ALIGN
+
+/**
+ * Object sizes as the JVM lays them out. The hprof writes every reference with [idSize] bytes and has no header nor
+ * alignment; with compressed oops ([refSize] = 4) that overstates reference-heavy objects.
+ */
+internal class SizeModel(val idSize: Int, val refSize: Int) {
+    /** Field bytes of an instance with [refs] reference fields, references at [refSize]. */
+    fun payload(byteSize: Int, refs: Int) = byteSize.toLong() - refs.toLong() * (idSize - refSize)
+    fun instance(byteSize: Int, refs: Int) = align(OBJ_HEADER + payload(byteSize, refs))
+    fun objectArray(length: Int) = align(ARRAY_HEADER + length.toLong() * refSize)
+    fun primitiveArray(byteSize: Int) = align(ARRAY_HEADER + byteSize.toLong())
+
+    companion object {
+        /** `java.vm.compressedOopsMode` is only set when compressed oops are on. */
+        fun of(idSize: Int, props: Map<String, String>) =
+            SizeModel(idSize, if (idSize == 4 || "java.vm.compressedOopsMode" in props) 4 else idSize)
+    }
+}
+
+/** Shallow size of any object under [model]; reference fields per instance class (whole hierarchy) are cached. */
+internal class SizeOf(private val graph: HeapGraph, val model: SizeModel) {
+    private val refs = HashMap<Long, Int>()
+
+    private fun refFields(classId: Long) = refs.getOrPut(classId) {
+        (graph.findObjectById(classId) as HeapClass).classHierarchy
+            .sumOf { c -> c.readRecordFields().count { it.type == PrimitiveType.REFERENCE_HPROF_TYPE } }
+    }
+
+    fun payload(o: HeapInstance) = model.payload(o.byteSize, refFields(o.instanceClassId))
+
+    operator fun invoke(o: HeapObject): Long = when (o) {
+        is HeapClass -> o.recordSize.toLong()
+        is HeapInstance -> align(OBJ_HEADER + payload(o))
+        is HeapObjectArray -> model.objectArray(o.byteSize / model.idSize)
+        is HeapPrimitiveArray -> model.primitiveArray(o.byteSize)
+    }
 }
 
 // Shark 2.14 bug (HprofInMemoryIndex.indexedObjectOrNull): primitive arrays looked up by id get
@@ -314,6 +367,27 @@ private fun readVmArgs(graph: HeapGraph): List<String> =
         ?.firstNotNullOfOrNull { vm -> vm.refField("vmArgs")?.asInstance?.let(::readList)?.ifEmpty { null } }
         .orEmpty()
 
+const val REDACTED = "‹redacted›"
+
+/** Properties that identify the user or the machine layout; masked whole. */
+private val PRIVATE_PROPS = setOf("user.name", "user.home", "user.dir", "java.class.path", "jdk.module.path", "java.library.path")
+private val SECRET_KEY = Regex("(?i)pass|secret|token|credential|auth|key")
+
+/** Masks private properties, secret-looking keys and the program arguments of `sun.java.command` (its 1st token stays). */
+internal fun redactProps(props: Map<String, String>): Map<String, String> = props.mapValuesTo(sortedMapOf()) { (k, v) ->
+    when {
+        k == "sun.java.command" -> v.trim().split(Regex("\\s+"), limit = 2).let { if (it.size > 1) "${it[0]} $REDACTED" else v }
+        k in PRIVATE_PROPS || SECRET_KEY.containsMatchIn(k) -> REDACTED
+        else -> v
+    }
+}
+
+/** `-Dkey=value` / `--opt=value` with a secret-looking key get the value masked. */
+internal fun redactArgs(args: List<String>): List<String> = args.map { a ->
+    val eq = a.indexOf('=')
+    if (eq > 0 && SECRET_KEY.containsMatchIn(a.substring(0, eq))) a.substring(0, eq + 1) + REDACTED else a
+}
+
 /** Framework name to a class that is only loaded when the framework is in use. */
 private val FRAMEWORKS = listOf(
     "Spring Boot" to "org.springframework.boot.SpringApplication",
@@ -337,8 +411,9 @@ private val FRAMEWORKS = listOf(
 
 // ponytail: fixed list of JDK/language/framework/library roots; unknown third-party libs count as application
 // in auto mode. --app-package (or a main class outside these roots) gives the exact view.
-private val LIB_PREFIXES = listOf(
-    "java", "javax", "jakarta", "jdk", "sun", "com.sun", "org.jcp", "org.w3c", "org.xml", "org.ietf", "kotlin", "kotlinx", "scala", "groovy", "org.codehaus.groovy",
+private val JDK_PREFIXES = listOf("java", "javax", "jdk", "sun", "com.sun", "org.jcp", "org.w3c", "org.xml", "org.ietf")
+private val LIB_PREFIXES = JDK_PREFIXES + listOf(
+    "jakarta", "kotlin", "kotlinx", "scala", "groovy", "org.codehaus.groovy",
     "org.springframework", "org.apache", "org.hibernate", "io.netty", "io.quarkus", "io.smallrye", "io.micronaut",
     "io.vertx", "io.undertow", "org.xnio", "org.jboss", "org.wildfly", "org.eclipse", "org.glassfish", "com.fasterxml",
     "ch.qos.logback", "org.slf4j", "io.micrometer", "reactor", "io.projectreactor", "com.google", "net.bytebuddy",
@@ -349,6 +424,29 @@ private val LIB_PREFIXES = listOf(
 ).map { "$it." }
 
 internal fun isLibraryClass(name: String) = LIB_PREFIXES.any { name.startsWith(it) }
+
+/**
+ * Rules for coloring class/package names by origin in the HTML (same logic as [isAppClass]): [app] are the effective
+ * application prefixes (empty = everything outside [lib] is application), [generated] the generator name markers.
+ */
+@Serializable
+data class Origins(val jdk: List<String>, val lib: List<String>, val app: List<String>, val generated: List<String>)
+
+internal fun origins(app: List<String>) =
+    Origins(JDK_PREFIXES.map { "$it." }, LIB_PREFIXES, app.map { "$it." }, GENERATORS.map { it.second } + "\$\$")
+
+/** Known-harmless findings: class name prefix → i18n key of the reason. Shown dimmed, never on top. */
+internal val BENIGN = mapOf(
+    "java.util.zip.ZipFile\$Source" to "benign.zipSource",
+    "java.util.Locale\$Cache" to "benign.localeCache",
+    "java.util.Locale\$LocaleKey" to "benign.localeCache",
+    "sun.util.locale.BaseLocale\$Cache" to "benign.localeCache",
+    "sun.util.locale.LocaleObjectCache" to "benign.localeCache",
+    "java.lang.invoke.MethodType\$ConcurrentWeakInternSet" to "benign.methodType",
+    "java.lang.invoke.MethodType" to "benign.methodType",
+)
+
+internal fun benignReason(className: String): String? = BENIGN.entries.firstOrNull { className.startsWith(it.key) }?.value
 
 /**
  * Application class: matches [prefixes], or (when empty) is outside [LIB_PREFIXES]. Primitive arrays,
@@ -459,8 +557,9 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val classesPerLoader = HashMap<Long, Int>()
         val leakIds = LinkedHashSet<Long>()
         var totalShallow = 0L
-        val waste = WasteCollector(graph, n)
-        val refs = RefCollector(graph)
+        val sizeOf = SizeOf(graph, SizeModel.of(graph.identifierByteSize, jvm))
+        val waste = WasteCollector(graph, n, sizeOf)
+        val refs = RefCollector(graph, sizeOf)
         val offHeap = OffHeapCollector()
         val conc = ConcurrencyCollector()
         val fw = FrameworkCollector()
@@ -490,7 +589,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             }
             val acc = accByName.getOrPut(name) { classAccs.add(Acc(name)); classAccs.size - 1 }
             clsOf[idx] = acc
-            val size = obj.shallowSize()
+            val size = sizeOf(obj)
             shallow[idx] = size
             classAccs[acc].count++
             classAccs[acc].shallow += size
@@ -518,7 +617,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                         val value = obj.readAsJavaString()
                         val valueArray = fields.named("value")?.asObject as? HeapPrimitiveArray
                         if (value != null && value.length <= MAX_DEDUP_STRING) {
-                            strings.getOrPut(value) { StrAcc(0, size + (valueArray?.byteSize ?: 0)) }.count++
+                            strings.getOrPut(value) { StrAcc(0, size + (valueArray?.let { sizeOf(it) } ?: 0)) }.count++
                         }
                         waste.string(fields, value, valueArray)
                     }
@@ -542,7 +641,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                     }
                     waste.objectArray(name, size, length, nulls)
                 }
-                is HeapPrimitiveArray -> waste.primitiveArray(size)
+                is HeapPrimitiveArray -> waste.primitiveArray(size, obj.byteSize)
             }
             if (++seen % 1_000_000 == 0) opt.log(opt.msg["log.progress", seen, n])
         }
@@ -694,7 +793,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         }
         val graphShape = guard("section.graph", null) { graphReport(heap, offsets, targets, bfs.depthCounts, top) }
         val inspections = guard("section.inspections", emptyList()) {
-            inspectFrameworks(fw, heap, classAccs.associate { it.name to it.count }, header.heapDumpTimestamp, top) { key, block ->
+            inspectFrameworks(fw, heap, bfs.parent, rootTypes, classAccs.associate { it.name to it.count }, header.heapDumpTimestamp, top) { key, block ->
                 guard(key, null, block)
             }
         }
@@ -710,6 +809,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             fileSize = file.length(),
             hprofVersion = header.version.versionString,
             identifierByteSize = header.identifierByteSize,
+            refSize = sizeOf.model.refSize,
             timestamp = Instant.ofEpochMilli(header.heapDumpTimestamp).toString(),
             objectCount = n,
             classCount = graph.classCount,
@@ -761,13 +861,19 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             proxies = proxyReport(::isApp),
         )
         val report = HeapReport(summary, classStats(classAccs), packageStats(classAccs), retainedObjects, tree, leaks, gcRoots,
-            threads, duplicateStrings, arrays, classLoaders, warnings, jvm, vmArgs, frameworks,
+            threads, duplicateStrings, arrays, classLoaders, warnings,
+            if (opt.redact) redactProps(jvm) else jvm, if (opt.redact) redactArgs(vmArgs) else vmArgs, frameworks,
+            redacted = opt.redact, origins = origins(appPrefixes), benign = BENIGN, vmThreads = VM_THREAD.pattern,
             proxies = proxyReport { true }, waste = wasteReport, references = refReport, offHeap = offHeapReport,
             leakSuspects = leakSuspects, mergedPaths = mergedPaths, retainedViews = retainedViews, concurrency = concurrency,
             graph = graphShape, inspections = inspections, metadata = metadata, app = app, pathCollections = pathCollections,
             histogram = classAccs.sortedByDescending { it.shallow }
                 .map { ClassStat(it.name, it.count, it.shallow, if (opt.retained) it.retained else null) })
-        return report.copy(health = guard("section.health", emptyList()) { health(report) })
+        val objects = guard("section.objects", emptyMap()) {
+            // ids cited by both the full and the application-only report
+            objectDetails(heap, bfs.parent, rootTypes, shallow, Json.encodeToString(report) + Json.encodeToString(report.appOnly()))
+        }
+        return report.copy(objects = objects, health = guard("section.health", emptyList()) { health(report) })
     }
 }
 

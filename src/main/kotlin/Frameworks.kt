@@ -11,9 +11,12 @@ data class FwSection(val key: String, val metrics: List<FwMetric>, val tables: L
 @Serializable
 data class FwMetric(val key: String, val value: Long, val bytes: Boolean = false)
 
-/** [rows]: cells as text; numeric columns hold plain numbers (formatted by the renderer from [FwColumn.type]). */
+/**
+ * [rows]: cells as text; numeric columns hold plain numbers (formatted by the renderer from [FwColumn.type]).
+ * [collapsed]: secondary data, rendered closed.
+ */
 @Serializable
-data class FwTable(val title: String, val columns: List<FwColumn>, val rows: List<List<String?>>)
+data class FwTable(val title: String, val columns: List<FwColumn>, val rows: List<List<String?>>, val collapsed: Boolean = false)
 
 /** [type]: text, num or bytes. */
 @Serializable
@@ -45,6 +48,25 @@ private val JDBC_PREFIXES = listOf(
     "org.postgresql.", "com.mysql.", "org.mariadb.", "oracle.jdbc.", "com.microsoft.sqlserver.", "org.h2.", "org.hsqldb.",
     "com.zaxxer.hikari.pool.", "org.apache.commons.dbcp2.",
 )
+
+/** GC roots that belong to a running thread: an exception reached from them is in use, not a VM/library constant. */
+private val THREAD_ROOTS = setOf("JavaFrame", "ThreadObject", "NativeStack", "ThreadBlock", "JniLocal")
+
+// ponytail: pre-allocated = shortest path goes through a static field or starts at a non-thread root (JVM's OOMs,
+// "/ by zero", H2's DbException constants). An application exception cached in a static field lands here too.
+internal fun isPreallocated(h: Heap, parent: IntArray, rootTypes: Map<Int, String>, v: Int): Boolean {
+    val classAcc = h.classNames.indexOf("java.lang.Class")
+    var cur = v
+    var hops = 0
+    while (hops++ < 10_000) {
+        val p = parent[cur]
+        if (p < 0) return false // unreachable: garbage, not a constant
+        if (p == h.n) return rootTypes[cur] !in THREAD_ROOTS
+        if (h.clsOf[p] == classAcc) return true
+        cur = p
+    }
+    return false
+}
 
 private val MAP_TYPES = setOf("java.util.HashMap", "java.util.LinkedHashMap", "java.util.concurrent.ConcurrentHashMap", "java.util.Hashtable")
 
@@ -84,8 +106,8 @@ internal class FrameworkCollector : Collector() {
 
 /** Runs every inspector whose classes are in the dump; [guard] isolates failures per inspector. */
 internal fun inspectFrameworks(
-    c: FrameworkCollector, h: Heap, classCounts: Map<String, Long>, dumpMillis: Long, top: Int,
-    guard: (String, () -> FwSection?) -> FwSection?,
+    c: FrameworkCollector, h: Heap, parent: IntArray, rootTypes: Map<Int, String>, classCounts: Map<String, Long>,
+    dumpMillis: Long, top: Int, guard: (String, () -> FwSection?) -> FwSection?,
 ): List<FwSection> {
     val graph = h.graph
     val watched = c.watched()
@@ -124,15 +146,20 @@ internal fun inspectFrameworks(
         val all = instances("throwable").ifEmpty { return@guard null }
         class T { var count = 0L; var retained = 0L }
         val groups = HashMap<Pair<String, String>, T>()
+        val pre = HashMap<Pair<String, String>, T>()
         for (t in all) {
             val message = t["java.lang.Throwable", "detailMessage"]?.value?.readAsJavaString()?.take(MAX_MESSAGE) ?: ""
-            groups.getOrPut(t.instanceClassName to message) { T() }.let { it.count++; it.retained += retained(t) ?: 0 }
+            val target = if (isPreallocated(h, parent, rootTypes, graph.indexOf(t))) pre else groups
+            target.getOrPut(t.instanceClassName to message) { T() }.let { it.count++; it.retained += retained(t) ?: 0 }
         }
+        val columns = listOf(FwColumn("col.class"), FwColumn("fw.c.message"), FwColumn("col.count", "num"), FwColumn("col.retained", "bytes"))
+        fun rows(m: Map<Pair<String, String>, T>) = m.entries.sortedByDescending { it.value.retained }.take(top)
+            .map { listOf(it.key.first, it.key.second, it.value.count.toString(), it.value.retained.toString()) }
         FwSection("fw.throwables",
-            listOf(FwMetric("fw.m.throwables", all.size.toLong()), FwMetric("fw.m.retained", groups.values.sumOf { it.retained }, bytes = true)),
-            listOf(FwTable("fw.t.throwables", listOf(FwColumn("col.class"), FwColumn("fw.c.message"), FwColumn("col.count", "num"), FwColumn("col.retained", "bytes")),
-                groups.entries.sortedByDescending { it.value.retained }.take(top)
-                    .map { listOf(it.key.first, it.key.second, it.value.count.toString(), it.value.retained.toString()) })))
+            listOf(FwMetric("fw.m.throwables", groups.values.sumOf { it.count }), FwMetric("fw.m.preallocated", pre.values.sumOf { it.count }),
+                FwMetric("fw.m.retained", groups.values.sumOf { it.retained }, bytes = true)),
+            listOfNotNull(FwTable("fw.t.throwables", columns, rows(groups)),
+                FwTable("fw.t.preallocated", columns, rows(pre), collapsed = true).takeIf { pre.isNotEmpty() }))
     }
     return out.filterNotNull()
 }

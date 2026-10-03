@@ -25,13 +25,25 @@ data class ConcurrencyReport(
     val stackGroups: List<StackGroup>,
     /** Frames aggregated from the top of the stacks (innermost frame first); value = thread count. */
     val flame: TreeNode?,
+    /** Every pool by class (before the top-N cut of [pools]). */
+    val poolsByClass: List<NamedCount> = emptyList(),
+    /** ThreadPoolExecutors with max = Integer.MAX_VALUE and an unbounded queue: max is never reached. */
+    val unboundedPools: Int = 0,
 )
 
-/** [queued]: tasks waiting in the work queue; null when the queue type is not known. */
+/**
+ * [queued]: tasks waiting in the work queue; null when the queue type is not known.
+ * [unbounded]: the work queue has no capacity limit; null when unknown.
+ */
 @Serializable
 data class PoolStat(
     val kind: String, val className: String, val id: String, val core: Int?, val max: Int?, val threads: Int?,
-    val queueType: String?, val queued: Int?, val completed: Long?,
+    val queueType: String?, val queued: Int?, val completed: Long?, val unbounded: Boolean? = null,
+)
+
+private val UNBOUNDED_QUEUES = setOf(
+    "java.util.concurrent.PriorityBlockingQueue", "java.util.concurrent.ScheduledThreadPoolExecutor\$DelayedWorkQueue",
+    "java.util.concurrent.LinkedTransferQueue", "java.util.concurrent.DelayQueue",
 )
 
 @Serializable
@@ -74,8 +86,8 @@ internal class ConcurrencyCollector : Collector() {
 
     fun result(graph: HeapGraph, retained: LongArray?, threads: List<ThreadInfo>, tlValues: Map<String, Int>, top: Int): ConcurrencyReport {
         checkOk()
-        val pools = pools.mapNotNull { (kind, id) -> graph.findObjectByIdOrNull(id)?.asInstance?.let { pool(kind, it) } }
-            .sortedWith(compareByDescending<PoolStat> { it.queued ?: -1 }.thenByDescending { it.threads ?: -1 }).take(top)
+        val all = pools.mapNotNull { (kind, id) -> graph.findObjectByIdOrNull(id)?.asInstance?.let { pool(kind, it) } }
+        val pools = all.sortedWith(compareByDescending<PoolStat> { it.queued ?: -1 }.thenByDescending { it.threads ?: -1 }).take(top)
         val vRetained = retained?.let { r ->
             virtualThreads.sumOf { id ->
                 graph.findObjectByIdOrNull(id)?.asInstance?.refField("cont")?.let { r[graph.indexOf(it)] } ?: 0L
@@ -91,6 +103,8 @@ internal class ConcurrencyCollector : Collector() {
                 .filterValues { it.size > 1 }.map { (frames, ts) -> StackGroup(ts.size, ts.take(STACK_GROUP_NAMES).map { it.name }, frames) }
                 .sortedByDescending { it.count }.take(top),
             flame = flame(threads),
+            poolsByClass = all.groupingBy { it.className }.eachCount().map { NamedCount(it.key, it.value) }.sortedByDescending { it.count },
+            unboundedPools = all.count { it.max == Int.MAX_VALUE && it.unbounded == true },
         )
     }
 
@@ -104,7 +118,7 @@ internal class ConcurrencyCollector : Collector() {
         return when (kind) {
             "ThreadPoolExecutor" -> PoolStat(kind, p.instanceClassName, hex(p.objectId), int("corePoolSize"), int("maximumPoolSize"),
                 p.refField("workers")?.asInstance?.refField("map")?.asInstance?.field("size")?.asInt,
-                queue?.instanceClassName, queue?.let(::queueSize), p.field("completedTaskCount")?.asLong)
+                queue?.instanceClassName, queue?.let(::queueSize), p.field("completedTaskCount")?.asLong, queue?.let(::unbounded))
             "ForkJoinPool" -> {
                 // queued = sum of (top - base) over the work queues ("queues" in JDK 25, "workQueues" before)
                 val queues = (p.refField("queues") ?: p.refField("workQueues"))?.asObjectArray?.readElements()?.mapNotNull { it.asObject?.asInstance }?.toList()
@@ -121,6 +135,13 @@ internal class ConcurrencyCollector : Collector() {
         q.field("count")?.let { c -> return c.asInt ?: c.asObject?.asInstance?.field("value")?.asInt } // ArrayBQ, LinkedBQ (AtomicInteger), LinkedBDeque
         q.field("size")?.asInt?.let { return it } // DelayedWorkQueue, PriorityBlockingQueue
         return if (q.instanceClassName == "java.util.concurrent.SynchronousQueue") 0 else null
+    }
+
+    /** LinkedBlockingQueue/Deque without a capacity, or a queue type that has none; null = unknown. */
+    private fun unbounded(q: HeapInstance): Boolean? = when {
+        q.instanceClassName in UNBOUNDED_QUEUES -> true
+        q.instanceClassName == "java.util.concurrent.SynchronousQueue" -> false
+        else -> q.field("capacity")?.asInt?.let { it == Int.MAX_VALUE }
     }
 
     private fun flame(threads: List<ThreadInfo>): TreeNode? {

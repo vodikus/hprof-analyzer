@@ -11,6 +11,7 @@
   --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --series-1: #2a78d6; --seq-2: #86b6ef; --seq-3: #3987e5; --seq-4: #1c5cab;
   --div-up: #d4553a; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; --neutral: #898781;
+  --origin-app: #2a78d6; --origin-lib: #eb6834; --origin-jdk: #1baf7a; --origin-gen: #eda100;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -18,6 +19,7 @@
     --page: #0d0d0d; --surface: #1a1a19; --text: #ffffff; --text-2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
     --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281; --div-up: #e66767;
+    --origin-app: #3987e5; --origin-lib: #d95926; --origin-jdk: #199e70; --origin-gen: #c98500;
   }
 }
 :root[data-theme="dark"] {
@@ -25,16 +27,21 @@
   --page: #0d0d0d; --surface: #1a1a19; --text: #ffffff; --text-2: #c3c2b7; --muted: #898781;
   --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
   --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281; --div-up: #e66767;
+  --origin-app: #3987e5; --origin-lib: #d95926; --origin-jdk: #199e70; --origin-gen: #c98500;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-nav { position: fixed; top: 0; left: 0; bottom: 0; width: 210px; padding: 20px 12px; overflow-y: auto; border-right: 1px solid var(--border); background: var(--surface); }
-nav a { display: block; padding: 5px 10px; border-radius: 6px; color: var(--text-2); text-decoration: none; }
+nav { position: fixed; top: 0; left: 0; bottom: 0; width: 230px; padding: 20px 12px; overflow-y: auto; border-right: 1px solid var(--border); background: var(--surface); }
+nav a { display: block; padding: 4px 10px; border-radius: 6px; color: var(--text-2); text-decoration: none; }
 nav a:hover { background: var(--grid); color: var(--text); }
+nav a.nomatch { opacity: 0.4; }
 nav .brand { font-weight: 600; color: var(--text); margin: 0 10px 12px; }
-main { margin-left: 210px; padding: 24px 32px 64px; max-width: 1400px; }
+nav .layer-nav { margin: 14px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+nav input { width: 100%; margin-bottom: 4px; }
+main { margin-left: 230px; padding: 24px 32px 64px; max-width: 1400px; }
 h1 { font-size: 22px; margin: 0 0 4px; overflow-wrap: anywhere; }
 h2 { font-size: 17px; margin: 40px 0 12px; scroll-margin-top: 16px; }
+.layer { font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin: 56px 0 -16px; padding-top: 12px; border-top: 2px solid var(--grid); }
 .sub { color: var(--text-2); margin: 0 0 20px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
@@ -43,13 +50,17 @@ h2 { font-size: 17px; margin: 40px 0 12px; scroll-margin-top: 16px; }
 .tile .v { font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
 .chart { width: 100%; height: 440px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; }
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; color: var(--text-2); }
-select { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--axis); border-radius: 6px; padding: 4px 8px; max-width: 100%; }
+select, input[type=search], button { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--axis); border-radius: 6px; padding: 4px 8px; max-width: 100%; }
+button { cursor: pointer; }
+button:hover { background: var(--grid); }
 .tablewrap { overflow: auto; max-height: 560px; padding: 0; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
 th { color: var(--text-2); font-weight: 600; cursor: pointer; user-select: none; white-space: nowrap; position: sticky; top: 0; background: var(--surface); }
 th:hover { color: var(--text); }
 td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.benign td { color: var(--muted); }
+a.obj { color: var(--series-1); }
 .mono { font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
 .muted { color: var(--muted); }
 details { border-bottom: 1px solid var(--grid); padding: 6px 0; }
@@ -57,6 +68,8 @@ summary { cursor: pointer; }
 pre { margin: 8px 0; padding: 10px; background: var(--page); border-radius: 6px; overflow-x: auto; font-size: 12px; white-space: pre; }
 .status { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 12px; }
 .status::before { content: "●"; margin-right: 4px; color: var(--c); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; background: var(--c); vertical-align: -1px; }
 .note { color: var(--text-2); font-size: 12px; margin-top: -6px; }
 footer.note { margin-top: 48px; }
 .warn { border-left: 4px solid var(--critical); }
@@ -71,9 +84,15 @@ footer.note { margin-top: 48px; }
 .sev { flex: none; font-weight: 600; font-size: 12px; white-space: nowrap; }
 .sev::before { content: var(--icon); color: var(--c); margin-right: 4px; }
 .scope { border-left: 4px solid var(--series-1); padding: 8px 12px; background: var(--surface); border-radius: 6px; overflow-wrap: anywhere; }
+#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100%); overflow-y: auto; padding: 16px 20px; background: var(--surface); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0,0,0,0.15); z-index: 10; }
+#drawer h3 { margin: 4px 0; overflow-wrap: anywhere; }
+#drawer h4 { margin: 16px 0 6px; }
+#drawer ol { margin: 0; padding-left: 20px; }
+#drawer li { overflow-wrap: anywhere; margin-bottom: 4px; }
+#drawer .close { float: right; }
 @media (max-width: 900px) {
   nav { position: static; width: auto; border-right: 0; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; }
-  nav .brand { width: 100%; }
+  nav .brand, nav .layer-nav, nav input { width: 100%; }
   main { margin-left: 0; padding: 16px; }
 }
 </style>
@@ -81,6 +100,7 @@ footer.note { margin-top: 48px; }
 <body>
 <nav id="nav"><div class="brand">hprof-analyzer</div></nav>
 <main id="main"></main>
+<aside id="drawer" hidden></aside>
 <script>/*ECHARTS*/</script>
 <script>
 const I18N = /*I18N*/;
@@ -90,6 +110,7 @@ const DATA = /*DATA*/;
   document.documentElement.lang = LOCALE;
   const main = document.getElementById('main');
   const nav = document.getElementById('nav');
+  const drawer = document.getElementById('drawer');
 
   // DOM helper: text always via textContent (heap data is untrusted)
   function el(tag, attrs, ...kids) {
@@ -111,24 +132,111 @@ const DATA = /*DATA*/;
   const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const short = s => s.length > 48 ? '…' + s.slice(-47) : s;
+  const tile = (k, v) => el('div', { class: 'tile' }, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v }));
+  const pct = v => v.toLocaleString(LOCALE, { maximumFractionDigits: 1 }) + '%';
+  const s = DATA.summary;
 
+  // ---- origin (JDK / library / application / generated) and known-harmless findings ----
+  const O = DATA.origins;
+  const ORIGINS = ['app', 'lib', 'jdk', 'gen'];
+  function origin(raw) {
+    if (!O) return null;
+    const n = String(raw).replace(/^class /, '').split(' ')[0].replace(/(\[\])+$/, '');
+    if (!n.includes('.')) return 'jdk'; // primitive arrays, default package
+    if (O.generated.some(m => n.includes(m))) return 'gen';
+    const p = n + '.';
+    if (O.app.length && O.app.some(a => p.startsWith(a))) return 'app';
+    if (O.jdk.some(a => p.startsWith(a))) return 'jdk';
+    if (O.lib.some(a => p.startsWith(a))) return 'lib';
+    return O.app.length ? 'lib' : 'app'; // same rule as isAppClass: auto mode counts unknown classes as application
+  }
+  const originColor = name => css('--origin-' + (origin(name) || 'app'));
+  const originLegend = () => el('div', { class: 'legend' }, ...ORIGINS.map(o => el('span', { style: `--c:var(--origin-${o})`, text: t('origin.' + o) })));
+  const BENIGN = Object.entries(DATA.benign || {});
+  const VM_THREAD = DATA.vmThreads ? new RegExp('^(?:' + DATA.vmThreads + ')$') : null;
+  const benignClass = name => name ? BENIGN.find(([p]) => String(name).replace(/^class /, '').startsWith(p))?.[1] ?? null : null;
+
+  // ---- object detail panel (#obj/<id>) ----
+  const OBJ = DATA.objects || {};
+  const objLink = (id, text) => OBJ[id] ? el('a', { class: 'obj mono', href: '#obj/' + id, text: text ?? id }) : el('span', { class: 'mono', text: text ?? id });
+  function showObject(id) {
+    const o = OBJ[id];
+    if (!o) return;
+    const close = el('button', { class: 'close', text: '✕ ' + t('obj.close') });
+    close.onclick = closeObject;
+    const fields = el('table', null, el('tbody', null, ...o.fields.map(f => el('tr', null,
+      el('td', { class: 'mono', text: f.name }), el('td', null, f.ref ? objLink(f.ref, f.value + ' ' + f.ref) : el('span', { class: 'mono', text: f.value }))))));
+    const path = o.path.length ? el('ol', null, ...o.path.map(p => el('li', null,
+      p.via ? el('div', { class: 'muted mono', text: '↓ ' + p.via }) : el('div', { class: 'muted', text: '[' + o.rootType + ']' }),
+      p.id ? objLink(p.id, `${p.label} ${p.id}`) : el('span', { text: p.label }))))
+      : el('p', { class: 'muted', text: t('obj.unreachable') });
+    drawer.replaceChildren(close,
+      el('h3', { class: 'mono', text: o.className }), el('div', { class: 'muted mono', text: id }),
+      el('div', { class: 'tiles', style: 'margin-top:12px' }, tile(t('col.shallow'), bytes(o.shallow)), tile(t('col.retained'), bytes(o.retained)),
+        o.length != null ? tile(t('obj.length'), num(o.length)) : null),
+      el('h4', { text: t('obj.dominator') }), o.dominator ? objLink(o.dominator, `${o.dominatorClass} ${o.dominator}`) : el('span', { text: o.dominatorClass || '-' }),
+      el('h4', { text: t('obj.path') }), path,
+      o.fields.length ? el('h4', { text: t('obj.fields') }) : null, o.fields.length ? fields : null);
+    drawer.hidden = false;
+    drawer.scrollTop = 0;
+  }
+  function closeObject() {
+    drawer.hidden = true;
+    if (location.hash.startsWith('#obj/')) history.replaceState(null, '', location.pathname + location.search);
+  }
+  addEventListener('keydown', e => { if (e.key === 'Escape' && !drawer.hidden) closeObject(); });
+
+  // ---- layers / sections / persistent anchors (#section/arg) ----
+  const anchors = {}; // section id -> arg => restore a selector
+  const setHash = h => history.replaceState(null, '', '#' + h);
+  function layer(key) {
+    nav.append(el('div', { class: 'layer-nav', text: t(key) }));
+    main.append(el('div', { class: 'layer', role: 'heading', 'aria-level': '2', text: t(key) }));
+  }
   function section(id, title, note) {
-    nav.append(el('a', { href: '#' + id, text: title }));
-    const s = el('section', { id }, el('h2', { text: title }));
-    if (note) s.append(el('p', { class: 'note', text: note }));
-    main.append(s);
-    return s;
+    nav.append(el('a', { href: '#' + id, 'data-for': id, text: title }));
+    const sec = el('section', { id }, el('h2', { text: title }));
+    if (note) sec.append(el('p', { class: 'note', text: note }));
+    main.append(sec);
+    return sec;
+  }
+  function applyHash() {
+    const [id, ...rest] = decodeURIComponent(location.hash.slice(1)).split('/');
+    const arg = rest.join('/');
+    if (id === 'obj') { showObject(arg); return; }
+    drawer.hidden = true;
+    const target = id && document.getElementById(id);
+    if (!target) return;
+    if (arg && anchors[id]) anchors[id](arg);
+    target.scrollIntoView();
   }
 
-  // Sortable table. cols: {h, v: row => raw value, f?: formatter, num?, mono?}
-  function table(cols, rows) {
+  // ---- tables: sort, filter, CSV, object links, benign rows dimmed and last ----
+  // cols: {h, v: row => raw value, f?: formatter, num?, mono?}; opts.benign: row => i18n key of the reason, or null
+  const tables = [];
+  function table(cols, rows, opts = {}) {
     if (!rows.length) return el('p', { class: 'muted', text: t('misc.noData') });
+    const reason = opts.benign || (() => null);
+    rows = [...rows.filter(r => !reason(r)), ...rows.filter(r => reason(r))];
     const tbody = el('tbody');
-    let sortCol = -1, asc = false;
-    const render = () => tbody.replaceChildren(...rows.map(r => el('tr', null, ...cols.map(c => {
+    const count = el('span', { class: 'muted' });
+    const filter = el('input', { type: 'search', placeholder: t('ui.filter'), 'aria-label': t('ui.filter') });
+    let sortCol = -1, asc = false, shown = rows;
+    const cell = (c, r) => {
       const raw = c.v(r);
-      return el('td', { class: c.num ? 'num' : (c.mono ? 'mono' : ''), text: raw == null ? '-' : (c.f ? c.f(raw) : raw) });
-    }))));
+      const text = raw == null ? '-' : (c.f ? c.f(raw) : raw);
+      return el('td', { class: c.num ? 'num' : (c.mono ? 'mono' : '') },
+        typeof raw === 'string' && OBJ[raw] ? objLink(raw) : String(text));
+    };
+    const render = () => {
+      const q = filter.value.trim().toLowerCase();
+      shown = q ? rows.filter(r => cols.some(c => String(c.v(r) ?? '').toLowerCase().includes(q))) : rows;
+      count.textContent = q ? t('ui.rows', num(shown.length), num(rows.length)) : '';
+      tbody.replaceChildren(...shown.map(r => {
+        const why = reason(r);
+        return el('tr', why ? { class: 'benign', title: t('benign.label') + ': ' + t(why) } : null, ...cols.map(c => cell(c, r)));
+      }));
+    };
     const head = el('tr', null, ...cols.map((c, i) => {
       const th = el('th', { text: c.h, title: t('misc.sort') });
       th.onclick = () => {
@@ -140,21 +248,56 @@ const DATA = /*DATA*/;
       };
       return th;
     }));
+    filter.oninput = render;
+    const csv = el('button', { text: '⤓ ' + t('ui.csv') });
+    const wrap = el('div', null, el('div', { class: 'toolbar' }, filter, csv, count),
+      el('div', { class: 'card tablewrap' }, el('table', null, el('thead', null, head), tbody)));
+    csv.onclick = () => {
+      const q = v => { const x = v == null ? '' : String(v); return /[",\n;]/.test(x) ? '"' + x.replace(/"/g, '""') + '"' : x; };
+      const text = [cols.map(c => q(c.h)), ...shown.map(r => cols.map(c => q(c.v(r))))].map(l => l.join(',')).join('\n');
+      const a = el('a', { href: URL.createObjectURL(new Blob(['﻿' + text], { type: 'text/csv' })),
+        download: `${s.file}-${wrap.closest('section')?.id || 'table'}.csv` });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    };
     render();
-    return el('div', { class: 'card tablewrap' }, el('table', null, el('thead', null, head), tbody));
+    tables.push({ wrap, setFilter: q => { filter.value = q; render(); return shown.length; } });
+    return wrap;
   }
 
-  // ---- charts: rebuilt on theme change so colors follow the CSS tokens ----
+  // global search: every table filter + dim the sections without matches
+  const search = el('input', { type: 'search', placeholder: t('ui.search'), 'aria-label': t('ui.search') });
+  nav.querySelector('.brand').after(search);
+  search.oninput = () => {
+    const q = search.value.trim();
+    const hits = {};
+    tables.forEach(tb => {
+      const id = tb.wrap.closest('section')?.id;
+      const n = tb.setFilter(q);
+      if (id) hits[id] = (hits[id] || 0) + n;
+    });
+    nav.querySelectorAll('a[data-for]').forEach(a => a.classList.toggle('nomatch', !!q && !hits[a.dataset.for]));
+  };
+
+  // ---- charts: drawn when scrolled into view, rebuilt on theme change so colors follow the CSS tokens ----
   const charts = [];
+  const io = new IntersectionObserver(entries => entries.forEach(e => {
+    if (!e.isIntersecting) return;
+    const c = charts.find(x => x.div === e.target);
+    io.unobserve(e.target);
+    if (c) { c.seen = true; draw(c); }
+  }), { rootMargin: '200% 0px' });
   function chart(parent, build, height) {
     const div = el('div', { class: 'chart' });
     if (height) div.style.height = height + 'px';
     parent.append(div);
-    const entry = { div, build, inst: null };
+    const entry = { div, build, inst: null, seen: false };
     charts.push(entry);
+    io.observe(div);
     return entry;
   }
   function draw(entry) {
+    if (!entry.seen) return; // not visible yet: the observer draws it
     if (entry.inst) entry.inst.dispose();
     entry.inst = echarts.init(entry.div);
     entry.inst.setOption(entry.build());
@@ -165,21 +308,30 @@ const DATA = /*DATA*/;
   }, extra);
 
   // Horizontal bar, single series (so no legend); items largest first. extra(item) adds a tooltip line.
-  function hbar(items, fmt, extra) {
+  // byOrigin: bars colored by the origin of the item name (legend from originLegend()).
+  function hbar(items, fmt, extra, byOrigin) {
     const data = [...items].reverse();
+    const colored = byOrigin && O;
     return {
       textStyle: baseText(),
       grid: { left: 12, right: 32, top: 12, bottom: 24, containLabel: true },
       tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
         formatter: ps => { const d = data[ps[0].dataIndex];
-          return `${esc(d.name)}<br><b>${fmt(ps[0].value)}</b>` + (extra ? '<br>' + esc(extra(d)) : ''); } }),
+          return `${esc(d.name)}<br><b>${fmt(ps[0].value)}</b>` + (colored ? '<br>' + esc(t('origin.' + origin(d.name))) : '')
+            + (extra ? '<br>' + esc(extra(d)) : ''); } }),
       xAxis: { type: 'value', minInterval: fmt === num ? 1 : 0, axisLabel: { color: css('--muted'), formatter: fmt }, splitLine: { lineStyle: { color: css('--grid') } } },
       yAxis: { type: 'category', data: data.map(d => short(d.name)), axisLabel: { color: css('--text-2') },
                axisLine: { lineStyle: { color: css('--axis') } }, axisTick: { show: false } },
-      series: [{ type: 'bar', data: data.map(d => d.value), barMaxWidth: 16, itemStyle: { color: css('--series-1'), borderRadius: [0, 4, 4, 0] } }],
+      series: [{ type: 'bar', barMaxWidth: 16, itemStyle: { color: css('--series-1'), borderRadius: [0, 4, 4, 0] },
+        data: data.map(d => colored ? { value: d.value, itemStyle: { color: originColor(d.name) } } : d.value) }],
     };
   }
   const barHeight = n => Math.max(160, n * 24 + 50);
+  // hbar colored by origin, with its legend above
+  function originBar(parent, items, fmt, extra, height) {
+    if (O) parent.append(originLegend());
+    return chart(parent, () => hbar(items(), fmt, extra, true), height);
+  }
 
   // Vertical bars of a distribution, buckets kept in their order; single series.
   function vbar(items, fmt) {
@@ -226,22 +378,78 @@ const DATA = /*DATA*/;
       series: [{ type: 'heatmap', data: cells, itemStyle: { borderColor: css('--surface'), borderWidth: 2 } }],
     };
   }
-  const pct = v => v.toLocaleString(LOCALE, { maximumFractionDigits: 1 }) + '%';
-  const tile = (k, v) => el('div', { class: 'tile' }, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v }));
+  // <details> whose content is built on first open (long stack traces)
+  function lazyDetails(summaryAttrs, build) {
+    const d = el('details', null, el('summary', summaryAttrs));
+    d.addEventListener('toggle', () => { if (d.open && d.childElementCount === 1) d.append(build()); });
+    return d;
+  }
 
-  const s = DATA.summary;
+  // Path graph (GC root → object) with a selector; paths: [{title, gcRoot, nodes}]; anchorId: section of #id/N
+  function renderPaths(lk, paths, selLabel, anchorId) {
+    if (!paths.length) { lk.append(el('p', { class: 'muted', text: t('misc.noData') })); return; }
+    const STATUS = { LEAKING: '--critical', NOT_LEAKING: '--good', UNKNOWN: '--neutral', TARGET: '--series-1' };
+    const statusColor = st => css(STATUS[st] || '--neutral');
+    const statusText = st => st === 'TARGET' ? t('paths.target') : st;
+    const leakSel = el('select', { 'aria-label': selLabel }, ...paths.map((l, i) => el('option', { value: i,
+      text: `${i + 1}. ${l.title} (${t('paths.nodes', l.nodes.length)})` + (benignClass(l.title) ? ' · ' + t('benign.label') : '') })));
+    const used = [...new Set(paths.flatMap(l => l.nodes.map(n => n.status)))];
+    const open = el('span');
+    lk.append(el('div', { class: 'toolbar' }, selLabel, leakSel, open,
+      ...used.map(st => el('span', { class: 'status', style: '--c:' + statusColor(st), text: statusText(st) }))));
+    const maxNodes = paths.reduce((m, l) => Math.max(m, l.nodes.length), 0);
+    const leakChart = chart(lk, () => {
+      const l = paths[+leakSel.value];
+      return {
+        textStyle: baseText(),
+        tooltip: tooltip({ formatter: p => p.dataType === 'edge' ? esc(p.data.ref)
+          : `${esc(p.data.full)}<br>${esc(statusText(p.data.status))}${p.data.reason ? ': ' + esc(p.data.reason) : ''}` }),
+        series: [{
+          type: 'graph', layout: 'none', roam: true, symbol: 'circle', symbolSize: 16, edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 9,
+          // pixel coordinates (no layout box) keep symbols round
+          label: { show: true, position: 'right', distance: 10, color: css('--text'), lineHeight: 16,
+            formatter: p => (p.data.ref ? '{ref|↓ ' + short(p.data.ref) + '}\n' : '') + short(p.data.full),
+            rich: { ref: { color: css('--text-2'), fontSize: 11 } } },
+          lineStyle: { color: css('--axis'), width: 2, opacity: 1 },
+          data: l.nodes.map((n, i) => ({
+            name: String(i), full: (i === 0 ? '[' + l.gcRoot + '] ' : '') + n.className, ref: n.reference,
+            status: n.status, reason: n.reason, x: 48, y: 40 + i * 80,
+            itemStyle: { color: statusColor(n.status), borderColor: css('--surface'), borderWidth: 2 },
+          // a lone node (the object is a GC root itself) has a zero-size extent that ECharts cannot fit: pad it
+          })).concat(l.nodes.length === 1 ? [{ name: '_', x: 48, y: 120, symbolSize: 0, label: { show: false }, tooltip: { show: false } }] : []),
+          links: l.nodes.slice(1).map((n, i) => ({ source: String(i), target: String(i + 1), ref: n.reference || '' })),
+        }],
+      };
+    }, Math.max(200, maxNodes * 80 + 20));
+    const detail = el('div');
+    const showDetail = () => {
+      const l = paths[+leakSel.value];
+      const id = (l.title.match(/@(0x[0-9a-f]+)/) || [])[1];
+      open.replaceChildren(...(id && OBJ[id] ? [objLink(id, '↗ ' + id)] : []));
+      const lines = [t('paths.gcRoot', l.gcRoot)];
+      l.nodes.forEach(n => {
+        if (n.reference) lines.push('    ↓ ' + n.reference);
+        lines.push(`${n.className}  [${n.type}, ${statusText(n.status)}${n.labels.length ? ', ' + n.labels.join('; ') : ''}]`);
+      });
+      detail.replaceChildren(el('pre', { class: 'mono', text: lines.join('\n') }));
+    };
+    leakSel.onchange = () => { draw(leakChart); showDetail(); setHash(anchorId + '/' + (+leakSel.value + 1)); };
+    anchors[anchorId] = arg => { if (paths[+arg - 1]) { leakSel.value = +arg - 1; draw(leakChart); showDetail(); } };
+    lk.append(detail);
+    showDetail();
+  }
+
   const hasRetained = s.reachableBytes != null;
+  const full = !DATA.appScope; // the application view drops sections that cannot be split by class
 
-  // ---- Resumo ----
   document.title = t('report.title', s.file);
   main.append(el('h1', { text: t('report.title', s.file) }));
   main.append(el('p', { class: 'sub', text: t('report.subtitle', s.hprofVersion, s.identifierByteSize, s.timestamp, num(s.analysisMillis)) }));
-  const full = !DATA.appScope; // the application view drops sections that cannot be split by class
   if (!full) main.append(el('p', { class: 'scope', text: t('report.appScope', DATA.appScope) }));
-  if (DATA.warnings?.length) {
-    section('warnings', '⚠ ' + t('section.warnings'), t('note.warnings')).append(
-      el('div', { class: 'card warn' }, el('ul', null, ...DATA.warnings.map(w => el('li', { text: w })))));
-  }
+  if (DATA.redacted) main.append(el('p', { class: 'note', text: '🔒 ' + t('report.redacted') }));
+
+  // ======================== Diagnóstico ========================
+  layer('layer.diagnosis');
   if (full) {
     const SEV = { critical: ['--critical', '"✖"'], warning: ['--warning', '"▲"'], info: ['--series-1', '"●"'] };
     const hs = DATA.health || [];
@@ -251,20 +459,23 @@ const DATA = /*DATA*/;
           el('span', { class: 'msg', text: t('health.' + h.key, ...h.args) })))))
       : el('p', { class: 'muted', text: '✓ ' + t('health.ok') })));
   }
-  const sum = section('summary', t('section.summary'), t('note.sizes'));
-  const tiles = [
+  if (DATA.warnings?.length) {
+    section('warnings', '⚠ ' + t('section.warnings'), t('note.warnings')).append(
+      el('div', { class: 'card warn' }, el('ul', null, ...DATA.warnings.map(w => el('li', { text: w })))));
+  }
+  section('summary', t('section.summary'), t('note.sizes')).append(el('div', { class: 'tiles' }, ...[
     ['summary.file', bytes(s.fileSize)], ['summary.objects', num(s.objectCount)], ['summary.classes', num(s.classCount)],
     ['summary.instances', num(s.instanceCount)], ['summary.objectArrays', num(s.objectArrayCount)], ['summary.primitiveArrays', num(s.primitiveArrayCount)],
     ['summary.gcRoots', num(s.gcRootCount)], ['summary.totalShallow', bytes(s.totalShallow)],
     ['summary.reachable', num(s.reachableCount)], ['summary.reachableBytes', bytes(s.reachableBytes)],
     ['summary.unreachable', hasRetained ? bytes(s.totalShallow - s.reachableBytes) : '-'],
-  ];
-  sum.append(el('div', { class: 'tiles' }, ...tiles.map(([k, v]) => el('div', { class: 'tile' }, el('div', { class: 'k', text: t(k) }), el('div', { class: 'v', text: v })))));
+    ['summary.sizeModel', s.refSize ? t('summary.sizeModelValue', s.refSize) : '-'],
+  ].map(([k, v]) => tile(t(k), v))));
 
-  // ---- Comparação entre dumps ----
   const df = DATA.diff;
   if (df) {
     const ds = section('diff', t('section.diff'), t('note.diff'));
+    if (df.mixedSizes) ds.append(el('div', { class: 'card warn', text: '⚠ ' + t('diff.mixedSizes') }));
     const heapOf = p => p.reachableBytes ?? p.totalShallow;
     const first = df.dumps[0], last = df.dumps[df.dumps.length - 1];
     const signed = (v, fmt) => (v > 0 ? '+' : v < 0 ? '−' : '') + fmt(Math.abs(v));
@@ -342,92 +553,14 @@ const DATA = /*DATA*/;
     growingOnly.onchange = () => redraw.forEach(f => f());
   }
 
-  // ---- Ambiente JVM ----
-  const KEY_PROPS = ['java.version', 'java.vendor', 'java.vm.name', 'java.vm.version', 'java.runtime.version', 'os.name', 'os.version',
-    'os.arch', 'user.dir', 'user.timezone', 'file.encoding', 'java.home', 'sun.java.command'];
-  const jvm = DATA.jvm || {};
-  const jv = section('jvm', t('section.jvm'));
-  const fw = DATA.frameworks || [];
-  jv.append(el('div', { class: 'toolbar' }, el('b', { text: t('jvm.frameworks') + ':' }),
-    ...(fw.length ? fw.map(f => el('span', { class: 'tag', text: f })) : [t('jvm.none')])));
-  const propCols = [{ h: t('col.property'), v: r => r.k, mono: true }, { h: t('col.value'), v: r => r.v, mono: true }];
-  jv.append(table(propCols, KEY_PROPS.filter(k => k in jvm).map(k => ({ k, v: jvm[k] }))));
-  jv.append(el('h3', { text: t('jvm.vmArgs') }), DATA.vmArgs?.length
-    ? el('pre', { class: 'mono', text: DATA.vmArgs.join('\n') }) : el('p', { class: 'note', text: t('note.vmArgs') }));
-  const allProps = Object.entries(jvm).map(([k, v]) => ({ k, v }));
-  if (allProps.length) jv.append(el('details', null, el('summary', { text: t('jvm.allProps', allProps.length) }), table(propCols, allProps)));
-
-  // ---- Classes geradas / proxies ----
-  if (DATA.proxies) {
-    const p = DATA.proxies;
-    const px = section('proxies', t('section.proxies'), t('note.proxies'));
-    const suspects = (p.groups || []).filter(g => g.suspect);
-    const pct = s.classCount ? (100 * (p.generatedClasses || 0) / s.classCount) : 0;
-    px.append(el('div', { class: 'tiles' }, ...[
-      [t('col.classes'), num(p.generatedClasses || 0)],
-      ['% ' + t('summary.classes'), pct.toLocaleString(LOCALE, { maximumFractionDigits: 1 }) + '%'],
-      [t('col.suspect'), num(suspects.length)],
-    ].map(([k, v]) => el('div', { class: 'tile' }, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v })))));
-    if (suspects.length) {
-      px.append(el('div', { class: 'card warn' }, el('b', { text: '⚠ ' + t('proxies.suspects', suspects.length) }),
-        el('ul', null, ...suspects.map(g => el('li', { class: 'mono', text: `${g.generator} · ${g.baseClass}: ${num(g.classes)} classes, ${num(g.loaders)} loaders` }))),
-        el('p', { class: 'note', text: t('note.proxiesTip') })));
-    }
-    const byGen = p.byGenerator || [];
-    if (byGen.length) chart(px, () => hbar(byGen.map(g => ({ name: g.name, value: g.count })), num), barHeight(byGen.length));
-    px.append(table([
-      { h: t('col.generator'), v: r => r.generator },
-      { h: t('col.baseClass'), v: r => r.baseClass, mono: true },
-      { h: t('col.classes'), v: r => r.classes, f: num, num: true },
-      { h: t('col.loaders'), v: r => r.loaders, f: num, num: true },
-      { h: t('col.instances'), v: r => r.instances, f: num, num: true },
-      { h: t('col.example'), v: r => r.example, mono: true },
-      { h: t('col.suspect'), v: r => r.suspect ? '⚠ ' + t('misc.yes') : t('misc.no') },
-    ], p.groups || []));
-  }
-
-  // ---- Histograma ----
-  const hist = section('classes', t('section.classes'));
-  const metrics = [['retained', t('col.retained'), bytes], ['shallow', t('col.shallow'), bytes], ['count', t('col.instances'), num]]
-    .filter(m => hasRetained || m[0] !== 'retained');
-  const metricSel = el('select', { 'aria-label': t('chart.metric') }, ...metrics.map(([k, l]) => el('option', { value: k, text: l })));
-  const cumulative = el('span', { class: 'muted' });
-  hist.append(el('div', { class: 'toolbar' }, t('chart.topClassesBy'), metricSel, cumulative));
-  // Pareto without a second axis: running share of the whole heap in the tooltip and the toolbar
-  const wholeOf = { retained: s.reachableBytes, shallow: s.totalShallow, count: s.objectCount };
-  const classChart = chart(hist, () => {
-    const [k, , fmt] = metrics.find(m => m[0] === metricSel.value);
-    const whole = wholeOf[k] || 1;
-    let run = 0;
-    const items = [...DATA.classes].sort((a, b) => b[k] - a[k]).slice(0, 20)
-      .map(c => ({ name: c.name, value: c[k], cum: 100 * (run += c[k]) / whole }));
-    cumulative.textContent = items.length ? '· ' + t('chart.cumulative', items.length, pct(items[items.length - 1].cum)) : '';
-    return hbar(items, fmt, d => t('chart.cumulative', items.indexOf(d) + 1, pct(d.cum)));
-  }, barHeight(20));
-  metricSel.onchange = () => draw(classChart);
-  hist.append(table([
-    { h: t('col.class'), v: r => r.name, mono: true },
-    { h: t('col.instances'), v: r => r.count, f: num, num: true },
-    { h: t('col.shallow'), v: r => r.shallow, f: bytes, num: true },
-    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-  ], DATA.classes));
-
-  // ---- Pacotes ----
-  const pk = section('packages', t('section.packages'), t('note.packages'));
-  chart(pk, () => hbar(DATA.packages.slice(0, 20).map(p => ({ name: p.name, value: p.shallow })), bytes), barHeight(Math.min(20, DATA.packages.length)));
-  pk.append(table([
-    { h: t('col.package'), v: r => r.name, mono: true },
-    { h: t('col.objects'), v: r => r.count, f: num, num: true },
-    { h: t('col.shallow'), v: r => r.shallow, f: bytes, num: true },
-    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-  ], DATA.packages));
-
-  // ---- Dominator treemap ----
+  // ======================== Onde está a memória ========================
+  layer('layer.memory');
   if (DATA.dominatorTree) {
     const tm = section('dominators', t('section.dominators'), t('note.dominators'));
     chart(tm, () => ({
       textStyle: baseText(),
-      tooltip: tooltip({ formatter: p => `${esc(p.name)}<br><b>${bytes(p.value)}</b>` }),
+      tooltip: tooltip({ formatter: p => `${esc(p.name)}<br><b>${bytes(p.value)}</b>`
+        + (benignClass(p.name) ? '<br>' + esc(t('benign.label') + ': ' + t(benignClass(p.name))) : '') }),
       series: [{
         type: 'treemap', name: 'heap', data: DATA.dominatorTree.children || [], leafDepth: 2, roam: false,
         top: 8, left: 8, right: 8, bottom: 36,
@@ -443,7 +576,6 @@ const DATA = /*DATA*/;
     }), 620);
   }
 
-  // ---- Retained agregado ----
   const rv = DATA.retainedViews;
   if (rv) {
     const rs = section('retained', t('section.retainedViews'), t('note.retainedViews'));
@@ -451,7 +583,7 @@ const DATA = /*DATA*/;
       rs.append(el('h3', { text: t('retained.byLoader') }));
       chart(rs, () => ({
         textStyle: baseText(),
-        tooltip: tooltip({ formatter: p => `${esc(p.treePathInfo.slice(1).map(x => x.name).join(' › '))}<br><b>${bytes(p.value)}</b>` }),
+        tooltip: tooltip({ formatter: p => `${esc(p.treePathInfo.slice(1).map(x => x.name).join(' › '))}<br><b>${bytes(p.value)}</b><br>${esc(t('col.retainedOverlap'))}` }),
         series: [{
           type: 'sunburst', data: rv.byLoader.children, radius: ['12%', '95%'], sort: null,
           itemStyle: { borderColor: css('--surface'), borderWidth: 2 },
@@ -462,91 +594,104 @@ const DATA = /*DATA*/;
     }
     rs.append(el('h3', { text: t('retained.staticFields') }));
     const sf = rv.staticFields || [];
-    if (sf.length) chart(rs, () => hbar(sf.slice(0, 20).map(f => ({ name: `${f.owner}.${f.field}`, value: f.retained, f })), bytes,
-      d => t('col.valueClass') + ': ' + d.f.valueClass), barHeight(Math.min(20, sf.length)));
+    if (sf.length) originBar(rs, () => sf.slice(0, 20).map(f => ({ name: `${f.owner}.${f.field}`, value: f.retained, f })), bytes,
+      d => t('col.valueClass') + ': ' + d.f.valueClass, barHeight(Math.min(20, sf.length)));
     rs.append(table([
       { h: t('col.owner'), v: r => r.owner, mono: true },
       { h: t('col.field'), v: r => r.field, mono: true },
       { h: t('col.valueClass'), v: r => r.valueClass, mono: true },
       { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-    ], sf));
+    ], sf, { benign: r => benignClass(r.valueClass) }));
     const dc = rv.dominators || [];
     if (dc.length) {
       rs.append(el('h3', { text: t('retained.dominators') }));
       const dSel = el('select', { 'aria-label': t('col.class') }, ...dc.map((c, i) => el('option', { value: i, text: `${c.className} (${bytes(c.retained)})` })));
       rs.append(el('div', { class: 'toolbar' }, t('col.class'), dSel));
-      const dChart = chart(rs, () => {
-        const c = dc[+dSel.value];
-        return hbar(c.by.map(d => ({ name: d.className, value: d.retained, count: d.count })), bytes, d => t('col.instances') + ': ' + num(d.count));
-      }, barHeight(10));
+      const dChart = originBar(rs, () => dc[+dSel.value].by.map(d => ({ name: d.className, value: d.retained, count: d.count })), bytes,
+        d => t('col.instances') + ': ' + num(d.count), barHeight(10));
       const dTable = el('div');
       const showTable = () => dTable.replaceChildren(table([
         { h: t('col.dominator'), v: r => r.className, mono: true },
         { h: t('col.instances'), v: r => r.count, f: num, num: true },
         { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-      ], dc[+dSel.value].by));
-      dSel.onchange = () => { draw(dChart); showTable(); };
+      ], dc[+dSel.value].by, { benign: r => benignClass(r.className) }));
+      const pick = i => { dSel.value = i; draw(dChart); showTable(); };
+      dSel.onchange = () => { pick(+dSel.value); setHash('retained/' + (+dSel.value + 1)); };
+      anchors.retained = arg => { if (dc[+arg - 1]) pick(+arg - 1); };
       rs.append(dTable);
       showTable();
     }
   }
 
-  // ---- Maiores objetos ----
   section('objects', t('section.objects')).append(table([
     { h: t('col.id'), v: r => r.id, mono: true },
     { h: t('col.class'), v: r => r.className, mono: true },
     { h: t('col.shallow'), v: r => r.shallow, f: bytes, num: true },
     { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
     { h: t('col.detail'), v: r => r.detail, mono: true },
-  ], DATA.retainedObjects));
+  ], DATA.retainedObjects, { benign: r => benignClass(r.className) }));
 
-  // ---- Caminhos GC root → objeto ----
-  // Path graph (GC root → object) with a selector; paths: [{title, gcRoot, nodes}]
-  function renderPaths(lk, paths, selLabel) {
-    if (!paths.length) { lk.append(el('p', { class: 'muted', text: t('misc.noData') })); return; }
-    const statusColor = st => css(st === 'LEAKING' ? '--critical' : st === 'NOT_LEAKING' ? '--good' : '--neutral');
-    const leakSel = el('select', { 'aria-label': selLabel }, ...paths.map((l, i) => el('option', { value: i, text: `${i + 1}. ${l.title} (${t('paths.nodes', l.nodes.length)})` })));
-    const legend = ['LEAKING', 'NOT_LEAKING', 'UNKNOWN'].map(st => el('span', { class: 'status', style: '--c:' + statusColor(st), text: st }));
-    lk.append(el('div', { class: 'toolbar' }, selLabel, leakSel, ...legend));
-    const maxNodes = paths.reduce((m, l) => Math.max(m, l.nodes.length), 0);
-    const leakChart = chart(lk, () => {
-      const l = paths[+leakSel.value];
-      return {
-        textStyle: baseText(),
-        tooltip: tooltip({ formatter: p => p.dataType === 'edge' ? esc(p.data.ref)
-          : `${esc(p.data.full)}<br>${esc(p.data.status)}${p.data.reason ? ': ' + esc(p.data.reason) : ''}` }),
-        series: [{
-          type: 'graph', layout: 'none', roam: true, symbol: 'circle', symbolSize: 16, edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 9,
-          // pixel coordinates (no layout box) keep symbols round
-          label: { show: true, position: 'right', distance: 10, color: css('--text'), lineHeight: 16,
-            formatter: p => (p.data.ref ? '{ref|↓ ' + short(p.data.ref) + '}\n' : '') + short(p.data.full),
-            rich: { ref: { color: css('--text-2'), fontSize: 11 } } },
-          lineStyle: { color: css('--axis'), width: 2, opacity: 1 },
-          data: l.nodes.map((n, i) => ({
-            name: String(i), full: (i === 0 ? '[' + l.gcRoot + '] ' : '') + n.className, ref: n.reference,
-            status: n.status, reason: n.reason, x: 48, y: 40 + i * 80,
-            itemStyle: { color: statusColor(n.status), borderColor: css('--surface'), borderWidth: 2 },
-          })),
-          links: l.nodes.slice(1).map((n, i) => ({ source: String(i), target: String(i + 1), ref: n.reference || '' })),
-        }],
-      };
-    }, Math.max(200, maxNodes * 80 + 20));
-    const detail = el('div');
-    const showDetail = () => {
-      const l = paths[+leakSel.value];
-      const lines = [t('paths.gcRoot', l.gcRoot)];
-      l.nodes.forEach(n => {
-        if (n.reference) lines.push('    ↓ ' + n.reference);
-        lines.push(`${n.className}  [${n.type}, ${n.status}${n.labels.length ? ', ' + n.labels.join('; ') : ''}]`);
-      });
-      detail.replaceChildren(el('pre', { class: 'mono', text: lines.join('\n') }));
-    };
-    leakSel.onchange = () => { draw(leakChart); showDetail(); };
-    lk.append(detail);
-    showDetail();
+  const hist = section('classes', t('section.classes'));
+  const metrics = [['retained', t('col.retained'), bytes], ['shallow', t('col.shallow'), bytes], ['count', t('col.instances'), num]]
+    .filter(m => hasRetained || m[0] !== 'retained');
+  const metricSel = el('select', { 'aria-label': t('chart.metric') }, ...metrics.map(([k, l]) => el('option', { value: k, text: l })));
+  const cumulative = el('span', { class: 'muted' });
+  hist.append(el('div', { class: 'toolbar' }, t('chart.topClassesBy'), metricSel, cumulative));
+  // Pareto without a second axis: running share of the whole heap in the tooltip and the toolbar
+  const wholeOf = { retained: s.reachableBytes, shallow: s.totalShallow, count: s.objectCount };
+  const classChart = originBar(hist, () => {
+    const [k] = metrics.find(m => m[0] === metricSel.value);
+    const whole = wholeOf[k] || 1;
+    let run = 0;
+    const items = [...DATA.classes].sort((a, b) => b[k] - a[k]).slice(0, 20)
+      .map(c => ({ name: c.name, value: c[k], cum: 100 * (run += c[k]) / whole }));
+    // retained of different classes overlaps: a running share would pass 100%
+    const additive = k !== 'retained';
+    cumulative.textContent = !items.length ? '' : additive ? '· ' + t('chart.cumulative', items.length, pct(items[items.length - 1].cum)) : '· ' + t('col.retainedOverlap');
+    items.forEach((d, i) => { d.rank = i + 1; d.additive = additive; });
+    return items;
+  }, v => metrics.find(m => m[0] === metricSel.value)[2](v), d => d.additive ? t('chart.cumulative', d.rank, pct(d.cum)) : t('col.retainedOverlap'), barHeight(20));
+  metricSel.onchange = () => draw(classChart);
+  hist.append(table([
+    { h: t('col.class'), v: r => r.name, mono: true },
+    { h: t('col.instances'), v: r => r.count, f: num, num: true },
+    { h: t('col.shallow'), v: r => r.shallow, f: bytes, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+  ], DATA.classes, { benign: r => benignClass(r.name) }));
+
+  const pk = section('packages', t('section.packages'), t('note.packages'));
+  originBar(pk, () => DATA.packages.slice(0, 20).map(p => ({ name: p.name, value: p.shallow })), bytes, null, barHeight(Math.min(20, DATA.packages.length)));
+  pk.append(table([
+    { h: t('col.package'), v: r => r.name, mono: true },
+    { h: t('col.objects'), v: r => r.count, f: num, num: true },
+    { h: t('col.shallow'), v: r => r.shallow, f: bytes, num: true },
+    { h: t('col.retainedOverlap'), v: r => r.retained, f: bytes, num: true },
+  ], DATA.packages));
+
+  const oh = DATA.offHeap;
+  if (oh) {
+    const os = section('offheap', t('section.offHeap'), t('note.offHeap'));
+    const d = oh.direct;
+    os.append(el('div', { class: 'tiles' },
+      tile(t('offheap.owners'), `${bytes(d.ownerBytes)} (${num(d.owners)})`),
+      tile(t('offheap.views'), `${bytes(d.viewBytes)} (${num(d.views)})`),
+      tile(t('offheap.mapped'), `${bytes(d.mappedBytes)} (${num(d.mapped)})`)));
+    if (oh.netty) os.append(el('p', { text: t('offheap.netty', num(oh.netty.chunks), bytes(oh.netty.allocated), bytes(oh.netty.used)) }));
+    os.append(el('h3', { text: t('offheap.heapVsOff') }));
+    chart(os, () => parts([
+      { name: t('offheap.heap'), value: s.reachableBytes ?? s.totalShallow },
+      { name: t('offheap.direct'), value: d.ownerBytes },
+      { name: t('offheap.mapped'), value: d.mappedBytes },
+    ], bytes), 110);
+    os.append(el('h3', { text: t('offheap.resources') }), table([
+      { h: t('col.class'), v: r => r.className, mono: true },
+      { h: t('col.count'), v: r => r.count, f: num, num: true },
+      { h: t('col.open'), v: r => r.open, f: num, num: true },
+    ], oh.resources || []));
   }
 
-  // ---- Suspeitas de leak ----
+  // ======================== Por que está retida ========================
+  layer('layer.retention');
   const ls = DATA.leakSuspects;
   if (ls) {
     const lsec = section('leaks', t('section.leaks'), t('note.leaks'));
@@ -564,12 +709,9 @@ const DATA = /*DATA*/;
         { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
       ], ls.groups.map((g, i) => ({ ...g, i: i + 1 }))));
     }
-    renderPaths(lsec, ls.groups.map((g, i) => ({ ...g.trace, title: `${g.trace.title} [${t('leaks.kind.' + g.kind)}, ${num(g.occurrences)}×]` })), t('leaks.group'));
+    renderPaths(lsec, ls.groups.map(g => ({ ...g.trace, title: `${g.trace.title} [${t('leaks.kind.' + g.kind)}, ${num(g.occurrences)}×]` })), t('leaks.group'), 'leaks');
   }
 
-  renderPaths(section('paths', t('section.paths'), t('note.paths')), DATA.leaks, t('paths.object'));
-
-  // ---- Caminhos agregados (Sankey) ----
   const mp = DATA.mergedPaths || [];
   if (mp.length) {
     const ms = section('merged', t('section.merged'), t('note.merged'));
@@ -599,208 +741,33 @@ const DATA = /*DATA*/;
         }],
       };
     }, 520);
-    mSel.onchange = () => draw(mChart);
+    mSel.onchange = () => { draw(mChart); setHash('merged/' + (+mSel.value + 1)); };
+    anchors.merged = arg => { if (mp[+arg - 1]) { mSel.value = +arg - 1; draw(mChart); } };
   }
 
-  // ---- GC roots ----
-  if (full) {
-    const gr = section('gcroots', t('section.gcRoots'));
-    chart(gr, () => hbar(DATA.gcRoots.map(g => ({ name: g.name, value: g.count })), num), barHeight(DATA.gcRoots.length));
-    gr.append(table([{ h: t('col.type'), v: r => r.name }, { h: t('col.count'), v: r => r.count, f: num, num: true }], DATA.gcRoots));
-  }
+  renderPaths(section('paths', t('section.paths'), t('note.paths')), DATA.leaks, t('paths.object'), 'paths');
 
-  // ---- Threads ----
-  const th = section('threads', t('section.threads'));
-  th.append(table([
-    { h: t('col.name'), v: r => r.name, mono: true },
-    { h: t('col.id'), v: r => r.id, mono: true },
-    { h: t('col.state'), v: r => r.state },
-    { h: t('col.daemon'), v: r => r.daemon == null ? null : (r.daemon ? t('misc.yes') : t('misc.no')) },
-    { h: t('col.priority'), v: r => r.priority, num: true },
-    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-    { h: t('col.localsRetained'), v: r => r.localsRetained, f: bytes, num: true },
-    { h: t('col.tlRetained'), v: r => r.threadLocalsRetained, f: bytes, num: true },
-    { h: t('col.threadLocals'), v: r => r.threadLocals, f: num, num: true },
-    { h: t('col.stale'), v: r => r.staleThreadLocals, f: num, num: true },
-    { h: t('col.frames'), v: r => r.frames.length, num: true },
-  ], DATA.threads));
-  // locals vs ThreadLocals per thread (top 20 by their sum); two series, so a legend
-  const tm = DATA.threads.filter(x => (x.localsRetained || 0) + (x.threadLocalsRetained || 0) > 0)
-    .sort((a, b) => (b.localsRetained + b.threadLocalsRetained) - (a.localsRetained + a.threadLocalsRetained)).slice(0, 20).reverse();
-  if (tm.length) {
-    th.append(el('h3', { text: t('conc.threadMemory') }));
-    chart(th, () => ({
-      textStyle: baseText(),
-      legend: { top: 0, left: 0, textStyle: { color: css('--text-2') } },
-      grid: { left: 12, right: 32, top: 32, bottom: 24, containLabel: true },
-      tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
-        formatter: ps => `${esc(tm[ps[0].dataIndex].name)}<br>` + ps.map(p => `${esc(p.seriesName)}: <b>${bytes(p.value)}</b>`).join('<br>') }),
-      xAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: bytes }, splitLine: { lineStyle: { color: css('--grid') } } },
-      yAxis: { type: 'category', data: tm.map(x => short(x.name)), axisLabel: { color: css('--text-2') }, axisTick: { show: false } },
-      series: [['col.localsRetained', 'localsRetained', '--series-1'], ['col.tlRetained', 'threadLocalsRetained', '--seq-4']].map(([k, f, c]) => ({
-        type: 'bar', stack: 'mem', name: t(k), data: tm.map(x => x[f] || 0), barMaxWidth: 16,
-        itemStyle: { color: css(c), borderColor: css('--surface'), borderWidth: 2 },
-      })),
-    }), barHeight(tm.length) + 30);
-  }
-  const stacks = el('div', { class: 'card' });
-  DATA.threads.filter(t => t.frames.length).forEach(t => {
-    const text = t.frames.map(f => 'at ' + f.text + f.locals.map(l => '\n      local: ' + l).join('')).join('\n');
-    stacks.append(el('details', null, el('summary', { class: 'mono', text: `${t.name} (${t.frames.length} frames)` }), el('pre', { class: 'mono', text })));
-  });
-  if (stacks.childElementCount) th.append(el('h3', { text: t('section.stacks') }), stacks);
-
-  // ---- Concorrência ----
-  const cc = DATA.concurrency;
-  if (cc) {
-    const cs = section('concurrency', t('section.concurrency'), t('note.concurrency'));
-    cs.append(el('div', { class: 'tiles' }, tile(t('conc.virtual'), num(cc.virtualThreads)),
-      tile(t('conc.virtualRetained'), bytes(cc.virtualRetained)), ...cc.states.map(x => tile(x.name, num(x.count)))));
-    if (cc.states.length) {
-      cs.append(el('h3', { text: t('conc.states') }));
-      chart(cs, () => hbar(cc.states.map(x => ({ name: x.name, value: x.count })), num), barHeight(cc.states.length));
-    }
-    cs.append(el('h3', { text: t('conc.pools') }));
-    const queued = cc.pools.filter(p => p.queued > 0);
-    if (queued.length) chart(cs, () => hbar(queued.slice(0, 20).map(p => ({ name: `${p.className} ${p.id}`, value: p.queued })), num), barHeight(Math.min(20, queued.length)));
-    cs.append(table([
+  const rf = DATA.references;
+  if (rf) {
+    const rs = section('references', t('section.references'), t('note.references'));
+    rs.append(el('div', { class: 'tiles' },
+      tile(t('refs.finalizerQueue'), rf.finalizerQueue == null ? t('misc.unknown') : num(rf.finalizerQueue)),
+      ...rf.kinds.map(k => tile(k.kind, num(k.count)))));
+    if (rf.kinds.length) chart(rs, () => hbar(rf.kinds.map(k => ({ name: k.kind, value: k.referentBytes })), bytes), barHeight(rf.kinds.length));
+    rs.append(table([
       { h: t('col.type'), v: r => r.kind },
-      { h: t('col.class'), v: r => r.className, mono: true },
-      { h: t('col.id'), v: r => r.id, mono: true },
-      { h: t('col.core'), v: r => r.core, f: num, num: true },
-      { h: t('col.max'), v: r => r.max, f: num, num: true },
-      { h: t('col.threads'), v: r => r.threads, f: num, num: true },
-      { h: t('col.queue'), v: r => r.queueType, mono: true },
-      { h: t('col.queued'), v: r => r.queued, f: num, num: true },
-      { h: t('col.completed'), v: r => r.completed, f: num, num: true },
-    ], cc.pools));
-    cs.append(el('h3', { text: t('conc.tlValues') }), table([
-      { h: t('col.class'), v: r => r.name, mono: true }, { h: t('col.count'), v: r => r.count, f: num, num: true },
-    ], cc.threadLocalValues));
-    cs.append(el('h3', { text: t('conc.stackGroups') }));
-    const groups = el('div', { class: 'card' });
-    cc.stackGroups.forEach(g => groups.append(el('details', null,
-      el('summary', { class: 'mono', text: `${t('conc.group', g.count)}: ${g.threads.join(', ')}` }),
-      el('pre', { class: 'mono', text: g.frames.map(f => 'at ' + f).join('\n') }))));
-    cs.append(groups.childElementCount ? groups : el('p', { class: 'muted', text: t('misc.noData') }));
-    if (cc.flame) {
-      cs.append(el('h3', { text: t('conc.flame') }));
-      chart(cs, () => ({
-        textStyle: baseText(),
-        tooltip: tooltip({ formatter: p => `${esc(p.name)}<br><b>${t('conc.group', num(p.value))}</b>` }),
-        series: [{
-          type: 'sunburst', data: cc.flame.children || [], radius: ['8%', '95%'], sort: null,
-          itemStyle: { borderColor: css('--surface'), borderWidth: 1 },
-          label: { show: false },
-          levels: [{}, ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => ({ itemStyle: { color: css(['--seq-4', '--seq-3', '--seq-2'][i % 3]) } }))],
-        }],
-      }), 560);
-    }
+      { h: t('col.count'), v: r => r.count, f: num, num: true },
+      { h: t('col.withReferent'), v: r => r.withReferent, f: num, num: true },
+      { h: t('col.referentBytes'), v: r => r.referentBytes, f: bytes, num: true },
+    ], rf.kinds));
+    const counts = list => table([{ h: t('col.class'), v: r => r.name, mono: true }, { h: t('col.count'), v: r => r.count, f: num, num: true }], list || []);
+    rs.append(el('h3', { text: t('refs.byClass') }), counts(rf.byClass));
+    rs.append(el('h3', { text: t('refs.finalizer') }), counts(rf.finalizable));
+    if (rf.cleaners?.length) rs.append(el('h3', { text: t('refs.cleaners') }), counts(rf.cleaners));
   }
 
-  // ---- Strings / arrays / loaders ----
-  if (full) section('strings', t('section.strings')).append(table([
-    { h: t('col.value'), v: r => r.value, f: v => JSON.stringify(v), mono: true },
-    { h: t('col.copies'), v: r => r.count, f: num, num: true },
-    { h: t('col.bytesEach'), v: r => r.bytesEach, f: bytes, num: true },
-    { h: t('col.wasted'), v: r => r.wasted, f: bytes, num: true },
-  ], DATA.duplicateStrings));
-  section('arrays', t('section.arrays')).append(table([
-    { h: t('col.id'), v: r => r.id, mono: true },
-    { h: t('col.type'), v: r => r.className, mono: true },
-    { h: t('col.length'), v: r => r.length, f: num, num: true },
-    { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
-    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-  ], DATA.largestArrays));
-  if (full) section('loaders', t('section.loaders')).append(table([
-    { h: t('col.id'), v: r => r.id, mono: true },
-    { h: t('col.class'), v: r => r.className, mono: true },
-    { h: t('col.classesLoaded'), v: r => r.classesLoaded, f: num, num: true },
-    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-  ], DATA.classLoaders));
-
-  // ---- Frameworks e tecnologias ----
-  const fws = DATA.inspections || [];
-  if (fws.length) {
-    const fs = section('frameworks', t('section.inspections'), t('note.inspections'));
-    fws.forEach(fw => {
-      fs.append(el('h3', { id: 'fw-' + fw.key, text: t(fw.key) }));
-      fs.append(el('div', { class: 'tiles' }, ...fw.metrics.map(m => tile(t(m.key), m.bytes ? bytes(m.value) : num(m.value)))));
-      fw.tables.forEach(tb => {
-        fs.append(el('p', null, el('b', { text: t(tb.title) })));
-        const cols = tb.columns.map((c, i) => c.type === 'text'
-          ? { h: t(c.key), v: r => r[i], mono: i === 0 }
-          : { h: t(c.key), v: r => r[i] == null ? null : Number(r[i]), f: c.type === 'bytes' ? bytes : num, num: true });
-        // bar of the first numeric column (bytes preferred) by the first text column
-        const k = tb.columns.findIndex(c => c.type === 'bytes') >= 0 ? tb.columns.findIndex(c => c.type === 'bytes') : tb.columns.findIndex(c => c.type === 'num');
-        const label = tb.columns.findIndex(c => c.type === 'text');
-        const items = tb.rows.filter(r => Number(r[k]) > 0).slice(0, 15).map(r => ({ name: r[label] ?? '-', value: Number(r[k]) }));
-        if (k >= 0 && label >= 0 && items.length > 1) chart(fs, () => hbar(items, tb.columns[k].type === 'bytes' ? bytes : num), barHeight(items.length));
-        fs.append(table(cols, tb.rows));
-      });
-    });
-  }
-
-  // ---- Estrutura do grafo ----
-  const gs = DATA.graph;
-  if (gs) {
-    const gsec = section('graph', t('section.graph'), t('note.graph'));
-    gsec.append(el('div', { class: 'tiles' }, tile(t('graph.maxDepth'), num(gs.maxDepth))));
-    gsec.append(el('h3', { text: t('graph.depths') }));
-    chart(gsec, () => vbar(gs.depths.map(b => ({ name: b.label, value: b.count })), num), 280);
-    const degreeCols = [
-      { h: t('col.id'), v: r => r.id, mono: true },
-      { h: t('col.class'), v: r => r.className, mono: true },
-      { h: t('col.degree'), v: r => r.degree, f: num, num: true },
-      { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-    ];
-    [['graph.fanIn', gs.fanIn], ['graph.fanOut', gs.fanOut]].forEach(([k, list]) => {
-      gsec.append(el('h3', { text: t(k) }));
-      const top = (list || []).slice(0, 15);
-      if (top.length) chart(gsec, () => hbar(top.map(o => ({ name: `${o.className} ${o.id}`, value: o.degree })), num), barHeight(top.length));
-      gsec.append(table(degreeCols, list || []));
-    });
-    const ce = gs.classEdges || [];
-    if (ce.length) {
-      gsec.append(el('h3', { text: t('graph.classEdges') }));
-      const names = [...new Set(ce.flatMap(e => [e.source, e.target]))];
-      const max = Math.max(...ce.map(e => e.count));
-      chart(gsec, () => ({
-        textStyle: baseText(),
-        tooltip: tooltip({ formatter: p => p.dataType === 'edge'
-          ? `${esc(p.data.source)} → ${esc(p.data.target)}<br><b>${num(p.data.value)}</b>` : esc(p.name) }),
-        series: [{
-          type: 'graph', layout: 'circular', circular: { rotateLabel: true }, roam: true, top: 80, bottom: 80, left: 160, right: 160,
-          data: names.map(name => ({ name, symbolSize: 8, itemStyle: { color: css('--series-1') } })),
-          links: ce.filter(e => e.source !== e.target).map(e => ({ source: e.source, target: e.target, value: e.count,
-            lineStyle: { width: 1 + 5 * e.count / max } })),
-          edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 6,
-          label: { show: true, position: 'right', color: css('--text-2'), fontSize: 10, formatter: p => short(p.name).slice(-32) },
-          lineStyle: { color: css('--seq-3'), opacity: 0.55, curveness: 0.3 },
-          emphasis: { focus: 'adjacency', lineStyle: { color: css('--series-1') } },
-        }],
-      }), 680);
-      gsec.append(table([
-        { h: t('col.source'), v: r => r.source, mono: true },
-        { h: t('col.target'), v: r => r.target, mono: true },
-        { h: t('col.count'), v: r => r.count, f: num, num: true },
-      ], ce));
-    }
-  }
-
-  // ---- Metadados do arquivo ----
-  const md = DATA.metadata;
-  if (md) {
-    const ms = section('metadata', t('section.metadata'), t('note.metadata'));
-    ms.append(el('div', { class: 'tiles' },
-      tile(t('meta.ratio'), s.totalShallow ? (s.fileSize / s.totalShallow).toLocaleString(LOCALE, { maximumFractionDigits: 2 }) : '-'),
-      tile(t('meta.gcs'), md.garbageCollectors.join(', ') || '-')));
-    if (md.memoryFlags.length) ms.append(el('h3', { text: t('meta.flags') }), el('pre', { class: 'mono', text: md.memoryFlags.join('\n') }));
-    ms.append(el('h3', { text: t('meta.records') }));
-    chart(ms, () => hbar(md.records.map(r => ({ name: r.name, value: r.count })), num), barHeight(md.records.length));
-  }
-
-  // ---- Desperdício ----
+  // ======================== Desperdício ========================
+  layer('layer.waste');
   const w = DATA.waste;
   if (w) {
     const ws = section('waste', t('section.waste'), t('note.waste'));
@@ -888,54 +855,253 @@ const DATA = /*DATA*/;
     ], st.prefixes || []));
   }
 
-  // ---- Referências e finalização ----
-  const rf = DATA.references;
-  if (rf) {
-    const rs = section('references', t('section.references'), t('note.references'));
-    rs.append(el('div', { class: 'tiles' },
-      tile(t('refs.finalizerQueue'), rf.finalizerQueue == null ? t('misc.unknown') : num(rf.finalizerQueue)),
-      ...rf.kinds.map(k => tile(k.kind, num(k.count)))));
-    if (rf.kinds.length) chart(rs, () => hbar(rf.kinds.map(k => ({ name: k.kind, value: k.referentBytes })), bytes), barHeight(rf.kinds.length));
-    rs.append(table([
+  if (full) section('strings', t('section.strings')).append(table([
+    { h: t('col.value'), v: r => r.value, f: v => JSON.stringify(v), mono: true },
+    { h: t('col.copies'), v: r => r.count, f: num, num: true },
+    { h: t('col.bytesEach'), v: r => r.bytesEach, f: bytes, num: true },
+    { h: t('col.wasted'), v: r => r.wasted, f: bytes, num: true },
+  ], DATA.duplicateStrings));
+  section('arrays', t('section.arrays')).append(table([
+    { h: t('col.id'), v: r => r.id, mono: true },
+    { h: t('col.type'), v: r => r.className, mono: true },
+    { h: t('col.length'), v: r => r.length, f: num, num: true },
+    { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+  ], DATA.largestArrays));
+
+  // ======================== Runtime ========================
+  layer('layer.runtime');
+  const th = section('threads', t('section.threads'));
+  th.append(table([
+    { h: t('col.name'), v: r => r.name, mono: true },
+    { h: t('col.id'), v: r => r.id, mono: true },
+    { h: t('col.state'), v: r => r.state },
+    { h: t('col.daemon'), v: r => r.daemon == null ? null : (r.daemon ? t('misc.yes') : t('misc.no')) },
+    { h: t('col.priority'), v: r => r.priority, num: true },
+    { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    { h: t('col.localsRetained'), v: r => r.localsRetained, f: bytes, num: true },
+    { h: t('col.tlRetained'), v: r => r.threadLocalsRetained, f: bytes, num: true },
+    { h: t('col.threadLocals'), v: r => r.threadLocals, f: num, num: true },
+    { h: t('col.stale'), v: r => r.staleThreadLocals, f: num, num: true },
+    { h: t('col.frames'), v: r => r.frames.length, num: true },
+  ], DATA.threads, { benign: r => VM_THREAD?.test(r.name) ? 'benign.vmThread' : null }));
+  // locals vs ThreadLocals per thread (top 20 by their sum); two series, so a legend
+  const tmem = DATA.threads.filter(x => (x.localsRetained || 0) + (x.threadLocalsRetained || 0) > 0)
+    .sort((a, b) => (b.localsRetained + b.threadLocalsRetained) - (a.localsRetained + a.threadLocalsRetained)).slice(0, 20).reverse();
+  if (tmem.length) {
+    th.append(el('h3', { text: t('conc.threadMemory') }));
+    chart(th, () => ({
+      textStyle: baseText(),
+      legend: { top: 0, left: 0, textStyle: { color: css('--text-2') } },
+      grid: { left: 12, right: 32, top: 32, bottom: 24, containLabel: true },
+      tooltip: tooltip({ trigger: 'axis', axisPointer: { type: 'shadow' },
+        formatter: ps => `${esc(tmem[ps[0].dataIndex].name)}<br>` + ps.map(p => `${esc(p.seriesName)}: <b>${bytes(p.value)}</b>`).join('<br>') }),
+      xAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: bytes }, splitLine: { lineStyle: { color: css('--grid') } } },
+      yAxis: { type: 'category', data: tmem.map(x => short(x.name)), axisLabel: { color: css('--text-2') }, axisTick: { show: false } },
+      series: [['col.localsRetained', 'localsRetained', '--series-1'], ['col.tlRetained', 'threadLocalsRetained', '--seq-4']].map(([k, f, c]) => ({
+        type: 'bar', stack: 'mem', name: t(k), data: tmem.map(x => x[f] || 0), barMaxWidth: 16,
+        itemStyle: { color: css(c), borderColor: css('--surface'), borderWidth: 2 },
+      })),
+    }), barHeight(tmem.length) + 30);
+  }
+  const stacks = el('div', { class: 'card' });
+  DATA.threads.filter(x => x.frames.length).forEach(x => stacks.append(lazyDetails({ class: 'mono', text: `${x.name} (${x.frames.length} frames)` },
+    () => el('pre', { class: 'mono', text: x.frames.map(f => 'at ' + f.text + f.locals.map(l => '\n      local: ' + l).join('')).join('\n') }))));
+  if (stacks.childElementCount) th.append(el('h3', { text: t('section.stacks') }), stacks);
+
+  const cc = DATA.concurrency;
+  if (cc) {
+    const cs = section('concurrency', t('section.concurrency'), t('note.concurrency'));
+    cs.append(el('div', { class: 'tiles' }, tile(t('conc.virtual'), num(cc.virtualThreads)),
+      tile(t('conc.virtualRetained'), bytes(cc.virtualRetained)), ...cc.states.map(x => tile(x.name, num(x.count)))));
+    if (cc.states.length) {
+      cs.append(el('h3', { text: t('conc.states') }));
+      chart(cs, () => hbar(cc.states.map(x => ({ name: x.name, value: x.count })), num), barHeight(cc.states.length));
+    }
+    cs.append(el('h3', { text: t('conc.pools') }));
+    const queued = cc.pools.filter(p => p.queued > 0);
+    if (queued.length) chart(cs, () => hbar(queued.slice(0, 20).map(p => ({ name: `${p.className} ${p.id}`, value: p.queued })), num), barHeight(Math.min(20, queued.length)));
+    cs.append(table([
       { h: t('col.type'), v: r => r.kind },
-      { h: t('col.count'), v: r => r.count, f: num, num: true },
-      { h: t('col.withReferent'), v: r => r.withReferent, f: num, num: true },
-      { h: t('col.referentBytes'), v: r => r.referentBytes, f: bytes, num: true },
-    ], rf.kinds));
-    const counts = list => table([{ h: t('col.class'), v: r => r.name, mono: true }, { h: t('col.count'), v: r => r.count, f: num, num: true }], list || []);
-    rs.append(el('h3', { text: t('refs.byClass') }), counts(rf.byClass));
-    rs.append(el('h3', { text: t('refs.finalizer') }), counts(rf.finalizable));
-    if (rf.cleaners?.length) rs.append(el('h3', { text: t('refs.cleaners') }), counts(rf.cleaners));
+      { h: t('col.class'), v: r => r.className, mono: true },
+      { h: t('col.id'), v: r => r.id, mono: true },
+      { h: t('col.core'), v: r => r.core, f: num, num: true },
+      { h: t('col.max'), v: r => r.max, f: num, num: true },
+      { h: t('col.threads'), v: r => r.threads, f: num, num: true },
+      { h: t('col.queue'), v: r => r.queueType, mono: true },
+      { h: t('col.unbounded'), v: r => r.unbounded == null ? null : (r.unbounded ? t('misc.yes') : t('misc.no')) },
+      { h: t('col.queued'), v: r => r.queued, f: num, num: true },
+      { h: t('col.completed'), v: r => r.completed, f: num, num: true },
+    ], cc.pools));
+    const byClass = cc.poolsByClass || [];
+    if (byClass.length) {
+      cs.append(el('h3', { text: t('conc.poolsByClass') }));
+      originBar(cs, () => byClass.slice(0, 20).map(x => ({ name: x.name, value: x.count })), num, null, barHeight(Math.min(20, byClass.length)));
+    }
+    cs.append(el('h3', { text: t('conc.tlValues') }), table([
+      { h: t('col.class'), v: r => r.name, mono: true }, { h: t('col.count'), v: r => r.count, f: num, num: true },
+    ], cc.threadLocalValues));
+    cs.append(el('h3', { text: t('conc.stackGroups') }));
+    const groups = el('div', { class: 'card' });
+    cc.stackGroups.forEach(g => groups.append(lazyDetails({ class: 'mono', text: `${t('conc.group', g.count)}: ${g.threads.join(', ')}` },
+      () => el('pre', { class: 'mono', text: g.frames.map(f => 'at ' + f).join('\n') }))));
+    cs.append(groups.childElementCount ? groups : el('p', { class: 'muted', text: t('misc.noData') }));
+    if (cc.flame) {
+      cs.append(el('h3', { text: t('conc.flame') }));
+      chart(cs, () => ({
+        textStyle: baseText(),
+        tooltip: tooltip({ formatter: p => `${esc(p.name)}<br><b>${t('conc.group', num(p.value))}</b>` }),
+        series: [{
+          type: 'sunburst', data: cc.flame.children || [], radius: ['8%', '95%'], sort: null,
+          itemStyle: { borderColor: css('--surface'), borderWidth: 1 },
+          label: { show: false },
+          levels: [{}, ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => ({ itemStyle: { color: css(['--seq-4', '--seq-3', '--seq-2'][i % 3]) } }))],
+        }],
+      }), 560);
+    }
   }
 
-  // ---- Off-heap ----
-  const oh = DATA.offHeap;
-  if (oh) {
-    const os = section('offheap', t('section.offHeap'), t('note.offHeap'));
-    const d = oh.direct;
-    os.append(el('div', { class: 'tiles' },
-      tile(t('offheap.owners'), `${bytes(d.ownerBytes)} (${num(d.owners)})`),
-      tile(t('offheap.views'), `${bytes(d.viewBytes)} (${num(d.views)})`),
-      tile(t('offheap.mapped'), `${bytes(d.mappedBytes)} (${num(d.mapped)})`)));
-    if (oh.netty) os.append(el('p', { text: t('offheap.netty', num(oh.netty.chunks), bytes(oh.netty.allocated), bytes(oh.netty.used)) }));
-    os.append(el('h3', { text: t('offheap.heapVsOff') }));
-    chart(os, () => parts([
-      { name: t('offheap.heap'), value: s.reachableBytes ?? s.totalShallow },
-      { name: t('offheap.direct'), value: d.ownerBytes },
-      { name: t('offheap.mapped'), value: d.mappedBytes },
-    ], bytes), 110);
-    os.append(el('h3', { text: t('offheap.resources') }), table([
+  const fws = DATA.inspections || [];
+  if (fws.length) {
+    const fs = section('frameworks', t('section.inspections'), t('note.inspections'));
+    fws.forEach(fw => {
+      fs.append(el('h3', { id: 'fw-' + fw.key, text: t(fw.key) }));
+      fs.append(el('div', { class: 'tiles' }, ...fw.metrics.map(m => tile(t(m.key), m.bytes ? bytes(m.value) : num(m.value)))));
+      fw.tables.forEach(tb => {
+        // secondary tables (e.g. pre-allocated exceptions) start closed
+        const box = tb.collapsed ? el('details', null, el('summary', { text: t(tb.title) })) : fs;
+        if (tb.collapsed) fs.append(box); else fs.append(el('p', null, el('b', { text: t(tb.title) })));
+        const cols = tb.columns.map((c, i) => c.type === 'text'
+          ? { h: t(c.key), v: r => r[i], mono: i === 0 }
+          : { h: t(c.key), v: r => r[i] == null ? null : Number(r[i]), f: c.type === 'bytes' ? bytes : num, num: true });
+        // bar of the first numeric column (bytes preferred) by the first text column
+        const k = tb.columns.findIndex(c => c.type === 'bytes') >= 0 ? tb.columns.findIndex(c => c.type === 'bytes') : tb.columns.findIndex(c => c.type === 'num');
+        const label = tb.columns.findIndex(c => c.type === 'text');
+        const items = tb.rows.filter(r => Number(r[k]) > 0).slice(0, 15).map(r => ({ name: r[label] ?? '-', value: Number(r[k]) }));
+        if (!tb.collapsed && k >= 0 && label >= 0 && items.length > 1) chart(fs, () => hbar(items, tb.columns[k].type === 'bytes' ? bytes : num), barHeight(items.length));
+        box.append(table(cols, tb.rows));
+      });
+    });
+  }
+
+  // ======================== Apêndice técnico ========================
+  layer('layer.appendix');
+  const KEY_PROPS = ['java.version', 'java.vendor', 'java.vm.name', 'java.vm.version', 'java.runtime.version', 'os.name', 'os.version',
+    'os.arch', 'user.dir', 'user.timezone', 'file.encoding', 'java.home', 'sun.java.command'];
+  const jvm = DATA.jvm || {};
+  const jv = section('jvm', t('section.jvm'));
+  const fw = DATA.frameworks || [];
+  jv.append(el('div', { class: 'toolbar' }, el('b', { text: t('jvm.frameworks') + ':' }),
+    ...(fw.length ? fw.map(f => el('span', { class: 'tag', text: f })) : [t('jvm.none')])));
+  const propCols = [{ h: t('col.property'), v: r => r.k, mono: true }, { h: t('col.value'), v: r => r.v, mono: true }];
+  jv.append(table(propCols, KEY_PROPS.filter(k => k in jvm).map(k => ({ k, v: jvm[k] }))));
+  jv.append(el('h3', { text: t('jvm.vmArgs') }), DATA.vmArgs?.length
+    ? el('pre', { class: 'mono', text: DATA.vmArgs.join('\n') }) : el('p', { class: 'note', text: t('note.vmArgs') }));
+  const allProps = Object.entries(jvm).map(([k, v]) => ({ k, v }));
+  if (allProps.length) jv.append(el('details', null, el('summary', { text: t('jvm.allProps', allProps.length) }), table(propCols, allProps)));
+
+  if (DATA.proxies) {
+    const p = DATA.proxies;
+    const px = section('proxies', t('section.proxies'), t('note.proxies'));
+    const suspects = (p.groups || []).filter(g => g.suspect);
+    const share = s.classCount ? (100 * (p.generatedClasses || 0) / s.classCount) : 0;
+    px.append(el('div', { class: 'tiles' },
+      tile(t('col.classes'), num(p.generatedClasses || 0)),
+      tile('% ' + t('summary.classes'), pct(share)),
+      tile(t('col.suspect'), num(suspects.length))));
+    if (suspects.length) {
+      px.append(el('div', { class: 'card warn' }, el('b', { text: '⚠ ' + t('proxies.suspects', suspects.length) }),
+        el('ul', null, ...suspects.map(g => el('li', { class: 'mono', text: `${g.generator} · ${g.baseClass}: ${num(g.classes)} classes, ${num(g.loaders)} loaders` }))),
+        el('p', { class: 'note', text: t('note.proxiesTip') })));
+    }
+    const byGen = p.byGenerator || [];
+    if (byGen.length) chart(px, () => hbar(byGen.map(g => ({ name: g.name, value: g.count })), num), barHeight(byGen.length));
+    px.append(table([
+      { h: t('col.generator'), v: r => r.generator },
+      { h: t('col.baseClass'), v: r => r.baseClass, mono: true },
+      { h: t('col.classes'), v: r => r.classes, f: num, num: true },
+      { h: t('col.loaders'), v: r => r.loaders, f: num, num: true },
+      { h: t('col.instances'), v: r => r.instances, f: num, num: true },
+      { h: t('col.example'), v: r => r.example, mono: true },
+      { h: t('col.suspect'), v: r => r.suspect ? '⚠ ' + t('misc.yes') : t('misc.no') },
+    ], p.groups || []));
+  }
+
+  if (full) {
+    section('loaders', t('section.loaders')).append(table([
+      { h: t('col.id'), v: r => r.id, mono: true },
       { h: t('col.class'), v: r => r.className, mono: true },
-      { h: t('col.count'), v: r => r.count, f: num, num: true },
-      { h: t('col.open'), v: r => r.open, f: num, num: true },
-    ], oh.resources || []));
+      { h: t('col.classesLoaded'), v: r => r.classesLoaded, f: num, num: true },
+      { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    ], DATA.classLoaders));
+    const gr = section('gcroots', t('section.gcRoots'));
+    chart(gr, () => hbar(DATA.gcRoots.map(g => ({ name: g.name, value: g.count })), num), barHeight(DATA.gcRoots.length));
+    gr.append(table([{ h: t('col.type'), v: r => r.name }, { h: t('col.count'), v: r => r.count, f: num, num: true }], DATA.gcRoots));
+  }
+
+  const gs = DATA.graph;
+  if (gs) {
+    const gsec = section('graph', t('section.graph'), t('note.graph'));
+    gsec.append(el('div', { class: 'tiles' }, tile(t('graph.maxDepth'), num(gs.maxDepth))));
+    gsec.append(el('h3', { text: t('graph.depths') }));
+    chart(gsec, () => vbar(gs.depths.map(b => ({ name: b.label, value: b.count })), num), 280);
+    const degreeCols = [
+      { h: t('col.id'), v: r => r.id, mono: true },
+      { h: t('col.class'), v: r => r.className, mono: true },
+      { h: t('col.degree'), v: r => r.degree, f: num, num: true },
+      { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    ];
+    [['graph.fanIn', gs.fanIn], ['graph.fanOut', gs.fanOut]].forEach(([k, list]) => {
+      gsec.append(el('h3', { text: t(k) }));
+      const top = (list || []).slice(0, 15);
+      if (top.length) chart(gsec, () => hbar(top.map(o => ({ name: `${o.className} ${o.id}`, value: o.degree })), num), barHeight(top.length));
+      gsec.append(table(degreeCols, list || []));
+    });
+    const ce = gs.classEdges || [];
+    if (ce.length) {
+      gsec.append(el('h3', { text: t('graph.classEdges') }));
+      const names = [...new Set(ce.flatMap(e => [e.source, e.target]))];
+      const max = Math.max(...ce.map(e => e.count));
+      chart(gsec, () => ({
+        textStyle: baseText(),
+        tooltip: tooltip({ formatter: p => p.dataType === 'edge'
+          ? `${esc(p.data.source)} → ${esc(p.data.target)}<br><b>${num(p.data.value)}</b>` : esc(p.name) }),
+        series: [{
+          type: 'graph', layout: 'circular', circular: { rotateLabel: true }, roam: true, top: 80, bottom: 80, left: 160, right: 160,
+          data: names.map(name => ({ name, symbolSize: 8, itemStyle: { color: css('--series-1') } })),
+          links: ce.filter(e => e.source !== e.target).map(e => ({ source: e.source, target: e.target, value: e.count,
+            lineStyle: { width: 1 + 5 * e.count / max } })),
+          edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 6,
+          label: { show: true, position: 'right', color: css('--text-2'), fontSize: 10, formatter: p => short(p.name).slice(-32) },
+          lineStyle: { color: css('--seq-3'), opacity: 0.55, curveness: 0.3 },
+          emphasis: { focus: 'adjacency', lineStyle: { color: css('--series-1') } },
+        }],
+      }), 680);
+      gsec.append(table([
+        { h: t('col.source'), v: r => r.source, mono: true },
+        { h: t('col.target'), v: r => r.target, mono: true },
+        { h: t('col.count'), v: r => r.count, f: num, num: true },
+      ], ce));
+    }
+  }
+
+  const md = DATA.metadata;
+  if (md) {
+    const ms = section('metadata', t('section.metadata'), t('note.metadata'));
+    ms.append(el('div', { class: 'tiles' },
+      tile(t('meta.ratio'), s.totalShallow ? (s.fileSize / s.totalShallow).toLocaleString(LOCALE, { maximumFractionDigits: 2 }) : '-'),
+      tile(t('meta.gcs'), md.garbageCollectors.join(', ') || '-')));
+    if (md.memoryFlags.length) ms.append(el('h3', { text: t('meta.flags') }), el('pre', { class: 'mono', text: md.memoryFlags.join('\n') }));
+    ms.append(el('h3', { text: t('meta.records') }));
+    chart(ms, () => hbar(md.records.map(r => ({ name: r.name, value: r.count })), num), barHeight(md.records.length));
   }
 
   main.append(el('footer', { class: 'note', text: t('report.generatedBy', s.toolVersion) }));
   nav.querySelector('.brand').textContent = 'hprof-analyzer ' + s.toolVersion;
-  charts.forEach(draw);
   addEventListener('resize', () => charts.forEach(c => c.inst && c.inst.resize()));
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => charts.forEach(draw));
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => charts.forEach(c => c.inst && draw(c)));
+  addEventListener('hashchange', applyHash);
+  if (location.hash) applyHash();
 })();
 </script>
 </body>
