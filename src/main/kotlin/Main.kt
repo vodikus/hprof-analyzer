@@ -27,6 +27,7 @@ fun main(args: Array<String>) {
     var top = 50
     var retained = true
     var redact = true
+    var thresholds = DEFAULT_THRESHOLDS
     var leakClasses = emptySet<String>()
     var appPackages = emptySet<String>()
     var baselines = emptyList<File>()
@@ -39,6 +40,9 @@ fun main(args: Array<String>) {
             "--top" -> top = value(a).toIntOrNull()?.takeIf { n -> n > 0 } ?: fail(msg["cli.topInvalid"])
             "--no-retained" -> retained = false
             "--no-redact" -> redact = false
+            "--threshold" -> thresholds = parseThresholds(value(a), thresholds).getOrElse { e ->
+                fail(msg["cli.badThreshold", e.message ?: "", DEFAULT_THRESHOLDS.keys.joinToString()])
+            }
             "--leak-class" -> leakClasses = value(a).split(',').map(String::trim).filter(String::isNotEmpty).toSet()
             "--app-package" -> appPackages = value(a).split(',').map { p -> p.trim().removeSuffix(".") }.filter(String::isNotEmpty).toSet()
             "--baseline" -> baselines = value(a).split(',').map(String::trim).filter(String::isNotEmpty).map(::File)
@@ -56,9 +60,8 @@ fun main(args: Array<String>) {
     }
 
     System.err.println(NAME_VERSION)
-    val report = analyze(file, Options(top, retained, leakClasses, appPackages, redact, msg)).let { r ->
-        if (snapshots.isEmpty()) r
-        else r.copy(diff = diff(toSnapshot(r), snapshots, top)).let { it.copy(health = health(it)) }
+    val report = analyze(file, Options(top, retained, leakClasses, appPackages, redact, thresholds, msg)).let { r ->
+        if (snapshots.isEmpty()) r else conclude(r.copy(diff = diff(toSnapshot(r), snapshots, top)), thresholds)
     }
     out.mkdirs()
     fun write(r: HeapReport, base: String) {

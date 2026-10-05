@@ -67,7 +67,8 @@ java -Xmx4g -jar hprof-analyzer-all.jar <dump.hprof> [opções]
 | `--format html,md` | `html,md` | Lista de formatos separados por vírgula. `json` grava `<dump>.snapshot.json` com o histograma completo (base para comparar dumps). |
 | `--top <n>` | `50` | Linhas em cada tabela (classes, objetos, strings, arrays). |
 | `--no-retained` | desligado | Pula a dominator tree. Cerca de 2× mais rápido e usa menos memória, mas ficam vazios os retained sizes, o treemap e a seção de maiores objetos, e os caminhos até GC root só são calculados para `--leak-class`. |
-| `--no-redact` | desligado | Por padrão o relatório mascara `user.name`, `user.home`, `user.dir`, class/module/library path, os argumentos de `sun.java.command` (fica só o 1º token) e propriedades ou `-Dchave=valor` cuja chave contém `pass`, `secret`, `token`, `credential`, `auth` ou `key`. Esta opção mostra tudo. |
+| `--threshold k=v,...` | — | Limiares do painel de saúde (frações: `0.3` = 30%). Chaves: `bigDominator` (0.30), `lowFill` (0.25), `minFillInstances` (1000), `finalizerQueue` (10000), `poolQueue` (10000), `objectMappers` (10), `heapGrowth` (0.20), `webappLoaders` (2), `dupStrings` (0.10), `emptyCollections` (0.05), `poolsPerClass` (10), `offHeapRatio` (1.0), `duplicateClasses` (1), `softRefs` (0.10), `openFiles` (500), `sockets` (1000), `bigStaticCollection` (100000), `unreachable` (0.10), `libraryVersions` (1). Chave desconhecida encerra com erro. |
+| `--no-redact` | desligado | Por padrão o relatório mascara `user.name`, `user.home`, `user.dir`, class/module/library path, os argumentos de `sun.java.command` (fica só o 1º token) e propriedades ou `-Dchave=valor` cuja chave contém `pass`, `secret`, `token`, `credential`, `auth` ou `key`. Além disso, o diretório do usuário (em todas as grafias) vira `~` e o nome do usuário vira `‹user›` em qualquer texto do relatório e do snapshot (caminhos em `java.home`, nomes de threads, campos de objetos). Esta opção mostra tudo. |
 | `--leak-class a.B,c.D` | — | Nomes completos de classes. Até 20 instâncias dessas classes ganham caminho até GC root, além dos 10 maiores objetos. |
 | `--app-package a.b,c.d` | automático | Pacotes da aplicação para o relatório extra `<dump>-app.html`/`.md` (só classes da aplicação). Sem a opção, usa o pacote da main class (`sun.java.command`) ou, se for um jar/launcher, tudo fora de JDK, linguagem e frameworks/bibliotecas conhecidos. |
 | `--baseline a.json,b.json` | — | Snapshots de dumps anteriores (gerados com `--format json`). O relatório ganha a seção de comparação entre dumps. |
@@ -99,12 +100,39 @@ As seções ficam em seis camadas, da conclusão para a evidência (mesma ordem 
 
 | Camada | Seções |
 | --- | --- |
-| Diagnóstico | Painel de saúde, Avisos, Resumo, Comparação entre dumps |
-| Onde está a memória | Dominator tree, Retained agregado, Maiores objetos, Histograma, Pacotes, Off-heap |
+| Diagnóstico | Resumo executivo, Painel de saúde, Avisos, Resumo (com contexto do dump e dimensionamento), Por onde começar, Comparação entre dumps |
+| Onde está a memória | Orçamento de memória, Dominator tree, Retained agregado, Maiores objetos, Histograma, Pacotes, Off-heap |
 | Por que está retida | Suspeitas de leak, Caminhos agregados, Caminhos até GC roots, Referências |
 | Desperdício | Desperdício de memória (com boxing), Strings duplicadas, Maiores arrays |
 | Runtime | Threads (com stack traces), Concorrência, Frameworks |
-| Apêndice técnico | Ambiente JVM, Classes geradas, ClassLoaders, GC roots, Grafo, Metadados |
+| Apêndice técnico | Ambiente JVM, Classes geradas, ClassLoaders, GC roots, Bibliotecas, Grafo, Metadados |
+
+Análises automáticas (só no relatório completo):
+- **Resumo executivo**: 3 a 7 frases geradas por regras: heap alcançável, off-heap e lixo no dump; os maiores
+  componentes do orçamento; se o dump veio de um OOM; sinais de vazamento; por onde começar; achados do painel e a
+  faixa de `-Xmx` sugerida.
+- **Orçamento de memória**: atribuição exclusiva sobre a dominator tree. Cada objeto pertence ao componente
+  (aplicação, cada framework/biblioteca, JDK, gerado em runtime) do dominador não-JDK mais próximo, senão ao da sua
+  classe. As partes somam exatamente o heap alcançável; top 7 + "Outros", com o off-heap na mesma escala.
+- **Por onde começar**: nota 0–100 para as 30 maiores classes da aplicação/bibliotecas (classes do JDK e arrays ficam
+  de fora: são o conteúdo, não a causa). Fatores: fatia do heap retida (cheia a partir de 30%, peso 35%), crescimento
+  entre dumps com `--baseline` (25%), retida por campo estático (15%) ou por coleção (15%) e profundidade média do
+  caminho (10%). Achados benignos valem 30%.
+- **Contexto do dump**: pós-OOM quando há `OutOfMemoryError` em variável local de thread ou um OOM não pré-alocado
+  retido; `-XX:+HeapDumpOnOutOfMemoryError` aparece só como indício. "Muito lixo" quando a regra `unreachable` dispara.
+- **Dimensionamento** (heurística): `-Xmx` entre 3× e 4× o live set e `MaxDirectMemorySize` ≥ 1,5× os buffers diretos,
+  comparado com o `-Xmx` atual quando os argumentos estão no heap.
+- **Desperdício por campo dono**: coleções com capacidade ociosa e strings duplicadas agrupadas pelo campo que as segura
+  (`Foo.cache`), subindo pelos internos de coleções do JDK. Nas strings, cada cópia contribui com sua parte do
+  desperdício (`bytes × (cópias − 1) / cópias`), então os donos somam o desperdício total. Donos internos do JDK (ex.:
+  `AppClassLoader.parallelLockMap`) ficam ocultos por padrão: no HTML há uma caixa para mostrá-los; no Markdown, uma
+  linha diz quantos foram omitidos. Classes definidas por mais de um ClassLoader são info com isolamento de plugins e
+  alerta quando alguma biblioteca aparece em versões diferentes.
+- **Bibliotecas**: JARs dos `ZipFile` abertos e do class path (só o nome do arquivo), com versão lida do nome; mesma
+  biblioteca em versões diferentes vira alerta.
+- **Regras novas no painel**: classes definidas por mais de um ClassLoader, bytes mantidos só por `SoftReference`,
+  coleção grande em campo estático, muitos arquivos/sockets abertos, dump sem `:live`, bibliotecas em mais de uma
+  versão e dump pós-OOM.
 
 No HTML:
 - **Menu lateral** agrupado por camada, com **busca global**: o termo filtra todas as tabelas e esmaece as seções sem
@@ -206,10 +234,12 @@ dumps (a partir de 3) e quando o heap cresce mais de 20%.
 ### Painel de saúde
 Primeira seção do relatório completo. Regras automáticas com severidade (crítico, alerta, info) e link para a seção:
 um objeto retendo mais de 30% do heap alcançável, fila do Finalizer acima de 10 mil, coleções grandes com fill ratio
-médio abaixo de 25%, 2 ou mais ClassLoaders de webapp (Tomcat/Jetty), strings duplicadas acima de 10% do heap, grupos
+médio abaixo de 25%, 2 ou mais ClassLoaders de webapp (Tomcat/Jetty), strings duplicadas (todas, não só o top N) acima de 10% do heap alcançável, grupos
 de proxies suspeitos, coleções vazias com array alocado acima de 5% do heap, off-heap (`DirectByteBuffer`) maior que o
-heap alcançável, 10 ou mais pools da mesma classe e pools com `max = Integer.MAX_VALUE` e fila ilimitada. Os limiares
-ficam em `Health.kt`.
+heap alcançável, 10 ou mais pools da mesma classe e pools com `max = Integer.MAX_VALUE` e fila ilimitada (exceto
+`ScheduledThreadPoolExecutor`, em que isso é o comportamento previsto; a coluna "fila ilimitada" da tabela de pools
+descreve só o tipo da fila). Os limiares
+ficam em `Health.kt` e podem ser alterados com `--threshold`. Cada achado mostra o limiar que ultrapassou, e uma lista recolhida no painel traz os limiares de todas as regras, inclusive as que não dispararam.
 
 ### Suspeitas de leak
 Uma única análise do Shark (`FilteringLeakingObjectFinder`) com regras de JVM: thread terminada ainda referenciada,

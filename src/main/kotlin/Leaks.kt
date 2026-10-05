@@ -84,14 +84,14 @@ internal fun toLeakPath(trace: LeakTrace, title: String, target: Boolean = false
     val objects = trace.referencePath.map { it.originObject } + trace.leakingObject
     val refs = listOf<String?>(null) + trace.referencePath.map { ref ->
         val static = if (ref.referenceType == ReferenceType.STATIC_FIELD) "static " else ""
-        "$static${ref.owningClassSimpleName}.${ref.referenceDisplayName}"
+        "$static${normalizeClassName(ref.owningClassSimpleName)}.${ref.referenceDisplayName}"
     }
     return LeakPath(
-        title = title,
+        title = normalizeClassName(title),
         gcRoot = trace.gcRootType.description,
         nodes = objects.mapIndexed { i, o ->
-            if (target && i == objects.lastIndex) PathNode(o.className, o.typeName, "TARGET", "", o.labels.toList(), refs[i])
-            else PathNode(o.className, o.typeName, o.leakingStatus.name, o.leakingStatusReason, o.labels.toList(), refs[i])
+            if (target && i == objects.lastIndex) PathNode(normalizeClassName(o.className), o.typeName, "TARGET", "", o.labels.toList(), refs[i])
+            else PathNode(normalizeClassName(o.className), o.typeName, o.leakingStatus.name, o.leakingStatusReason, o.labels.toList(), refs[i])
         },
     )
 }

@@ -29,6 +29,9 @@ private val REF_KINDS = listOf(
     "Final" to "java.lang.ref.FinalReference",
 )
 
+// ponytail: cap bounds the id list; a dump with more soft references undercounts the soft-only bytes
+private const val MAX_SOFT = 1_000_000
+
 private val CLEANERS = setOf("jdk.internal.ref.Cleaner", "sun.misc.Cleaner", "jdk.internal.ref.CleanerImpl\$PhantomCleanableRef")
 
 internal class RefCollector(private val graph: HeapGraph, private val sizeOf: SizeOf) : Collector() {
@@ -39,6 +42,8 @@ internal class RefCollector(private val graph: HeapGraph, private val sizeOf: Si
     private val byClass = HashMap<String, Int>()
     private val finalizable = HashMap<String, Int>()
     private val cleaners = HashMap<String, Int>()
+    /** Referent ids of SoftReferences, to measure what only they keep alive (see [softOnlyBytes]). */
+    val softReferents = ArrayList<Long>()
 
     fun instance(obj: HeapInstance, name: String, fields: List<HeapField>) = safe {
         val kind = kindByClass.getOrPut(obj.instanceClassId) {
@@ -53,6 +58,7 @@ internal class RefCollector(private val graph: HeapGraph, private val sizeOf: Si
             ?.value?.asNonNullObjectId ?: return@safe
         val referent = graph.findObjectByIdOrNull(id) ?: return@safe
         acc.withReferent++
+        if (kind == "Soft" && softReferents.size < MAX_SOFT) softReferents.add(id)
         acc.referentBytes += sizeOf(referent)
         if (name == "java.lang.ref.Finalizer") finalizable.merge(referent.className(), 1, Int::plus)
     }

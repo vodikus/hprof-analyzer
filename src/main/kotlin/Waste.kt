@@ -60,9 +60,12 @@ data class NullFieldClass(val className: String, val instances: Long, val fields
 @Serializable
 data class FieldNull(val name: String, val nullPct: Double)
 
-/** Split of the shallow sizes (see [SizeModel]): field/element bytes, object headers, alignment padding. */
+/**
+ * Split of the shallow sizes (see [SizeModel]): field/element bytes, object headers, alignment padding and [classes],
+ * the class objects (hprof class records, outside the layout model). The four add up to the total shallow size.
+ */
 @Serializable
-data class Overhead(val data: Long, val header: Long, val padding: Long)
+data class Overhead(val data: Long, val header: Long, val padding: Long, val classes: Long = 0)
 
 @Serializable
 data class StringStats(
@@ -82,6 +85,8 @@ private const val SPARSE_MIN_LENGTH = 8
 private const val PREFIX_LEN = 12
 private const val NULL_FIELD_CLASSES = 15
 private const val BIG_COLLECTIONS = 500
+// ponytail: bounds memory of the waste-by-owner input; beyond it collections are not grouped
+private const val MAX_IDLE = 500_000
 
 /** Size / backing array field per collection class; null size = derived (ArrayDeque head/tail). */
 private class CollType(val sizeField: String?, val arrayField: String)
@@ -125,7 +130,7 @@ internal fun List<HeapField>.named(name: String) = firstOrNull { it.name == name
 
 internal class WasteCollector(private val graph: HeapGraph, n: Int, private val sizeOf: SizeOf) : Collector() {
     private val idSize = graph.identifierByteSize
-    private val refSize = sizeOf.model.refSize
+    val refSize = sizeOf.model.refSize
 
     private class CollAcc { var count = 0L; var empty = 0L; var emptyBytes = 0L; var size = 0L; var capacity = 0L }
     private val collections = HashMap<String, CollAcc>()
@@ -169,6 +174,9 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int, private val 
     /** Biggest collections (size, object index), kept for matching collections across dumps by path. */
     private val big = PriorityQueue<LongArray>(compareBy { it[0] })
 
+    /** (object index, size, capacity) of collections with free slots, for grouping by owner field. */
+    val idle = ArrayList<LongArray>()
+
     /** Object index and size of the biggest collections, largest first. */
     fun bigCollections(): List<Pair<Int, Long>> = big.sortedByDescending { it[0] }.map { it[1].toInt() to it[0] }
 
@@ -180,6 +188,7 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int, private val 
         else Math.floorMod((fields.named("tail")?.asInt ?: 0) - (fields.named("head")?.asInt ?: 0), capacity.toInt()).toLong()
         val acc = collections.getOrPut(name) { CollAcc() }
         acc.count++; acc.size += size; acc.capacity += capacity
+        if (capacity > size && idle.size < MAX_IDLE) idle.add(longArrayOf(idx.toLong(), size, capacity))
         if (size > 0) {
             big.add(longArrayOf(size, idx.toLong()))
             if (big.size > BIG_COLLECTIONS) big.poll()
@@ -242,15 +251,19 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int, private val 
 
     fun primitiveArray(size: Long, byteSize: Int) = safe { overhead(size, ARRAY_HEADER, byteSize.toLong()) }
 
+    fun classObject(size: Long) = safe { classes += size }
+    private var classes = 0L
+
     private class DupAcc(val type: String, val length: Int, val bytes: Long) { var count = 0 }
 
     /** Second pass over primitive arrays (reads their content): zeroed and duplicated arrays. */
-    fun result(top: Int, strings: Map<String, StrAcc>): WasteReport {
+    /** [parent]: BFS tree (unreachable primitive arrays are garbage, not waste); [clean] redacts before prefixes are cut. */
+    fun result(top: Int, strings: Map<String, StrAcc>, parent: IntArray, clean: (String) -> String): WasteReport {
         checkOk()
         val dups = HashMap<Long, DupAcc>()
         for (a in graph.primitiveArrays) {
             val raw = a.byteSize.toLong()
-            if (raw < MIN_SCAN_BYTES || isStringValue[a.objectIndex]) continue
+            if (raw < MIN_SCAN_BYTES || isStringValue[a.objectIndex] || parent[a.objectIndex] < 0) continue
             val length = (raw / a.primitiveType.byteSize).toInt()
             val bytes = sizeOf.model.primitiveArray(a.byteSize)
             // ponytail: 64-bit FNV hash identifies content; a collision merges two arrays (vanishingly rare)
@@ -261,7 +274,7 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int, private val 
 
         val prefixes = HashMap<String, PrefixStat>()
         for ((s, acc) in strings) if (s.length >= PREFIX_LEN + 4) {
-            val p = s.take(PREFIX_LEN)
+            val p = clean(s).take(PREFIX_LEN)
             val old = prefixes[p]
             prefixes[p] = PrefixStat(p, (old?.count ?: 0) + acc.count, (old?.bytes ?: 0) + acc.count * acc.bytes)
         }
@@ -277,7 +290,7 @@ internal class WasteCollector(private val graph: HeapGraph, n: Int, private val 
                 .map { DupArray(it.type, it.length, it.count, it.bytes, (it.count - 1) * it.bytes) },
             boxing = boxes.map { (name, a) -> BoxStat(name, a.count, a.bytes, a.inRange - a.distinct) }.sortedByDescending { it.bytes },
             nullFields = nullFieldClasses(),
-            overhead = Overhead(data, header, padding),
+            overhead = Overhead(data, header, padding, classes),
             strings = StringStats(latin1, utf16, emptyStrings, longStrings, buckets(lengths),
                 topN(top, prefixes.values.asSequence().filter { it.count > 1 }) { it.bytes }),
         )

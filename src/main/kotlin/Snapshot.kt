@@ -18,6 +18,6 @@ private val json = Json { ignoreUnknownKeys = true }
 
 fun toSnapshot(r: HeapReport) = Snapshot(r.summary, r.histogram, r.packages, r.pathCollections)
 
-fun toSnapshotJson(r: HeapReport): String = Json.encodeToString(toSnapshot(r))
+fun toSnapshotJson(r: HeapReport): String = r.scrub(Json.encodeToString(toSnapshot(r)))
 
 fun readSnapshot(file: File): Snapshot = json.decodeFromString(file.readText())

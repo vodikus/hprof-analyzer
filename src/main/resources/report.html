@@ -12,6 +12,7 @@
   --series-1: #2a78d6; --seq-2: #86b6ef; --seq-3: #3987e5; --seq-4: #1c5cab;
   --div-up: #d4553a; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; --neutral: #898781;
   --origin-app: #2a78d6; --origin-lib: #eb6834; --origin-jdk: #1baf7a; --origin-gen: #eda100;
+  --cat-1: #2a78d6; --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; --cat-5: #e87ba4; --cat-6: #008300; --cat-7: #4a3aa7;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -20,6 +21,7 @@
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
     --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281; --div-up: #e66767;
     --origin-app: #3987e5; --origin-lib: #d95926; --origin-jdk: #199e70; --origin-gen: #c98500;
+    --cat-1: #3987e5; --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181; --cat-6: #008300; --cat-7: #9085e9;
   }
 }
 :root[data-theme="dark"] {
@@ -28,6 +30,7 @@
   --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
   --series-1: #3987e5; --seq-2: #1c5cab; --seq-3: #256abf; --seq-4: #104281; --div-up: #e66767;
   --origin-app: #3987e5; --origin-lib: #d95926; --origin-jdk: #199e70; --origin-gen: #c98500;
+  --cat-1: #3987e5; --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181; --cat-6: #008300; --cat-7: #9085e9;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -135,6 +138,10 @@ const DATA = /*DATA*/;
   const tile = (k, v) => el('div', { class: 'tile' }, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v }));
   const pct = v => v.toLocaleString(LOCALE, { maximumFractionDigits: 1 }) + '%';
   const s = DATA.summary;
+  const INS = DATA.insights || {};
+  const word = x => String(x).startsWith('@') ? t(String(x).slice(1)) : x; // '@key' = i18n key
+  const say = x => t(x.key, ...(x.args || []).map(word)); // empty args are omitted from the JSON
+  const frac = v => pct(100 * v);
 
   // ---- origin (JDK / library / application / generated) and known-harmless findings ----
   const O = DATA.origins;
@@ -348,7 +355,7 @@ const DATA = /*DATA*/;
   }
 
   // One horizontal bar split into the parts of a whole; legend + per-part tooltip.
-  const PART_COLORS = ['--series-1', '--seq-4', '--neutral'];
+  const PART_COLORS = ['--series-1', '--seq-4', '--neutral', '--cat-2'];
   function parts(items, fmt) {
     const total = items.reduce((a, p) => a + p.value, 0) || 1;
     return {
@@ -378,6 +385,17 @@ const DATA = /*DATA*/;
       series: [{ type: 'heatmap', data: cells, itemStyle: { borderColor: css('--surface'), borderWidth: 2 } }],
     };
   }
+  // Table of owner fields: JDK-internal owners (no action possible) hidden until the checkbox is ticked
+  function ownerTable(rows, cols) {
+    const box = el('div');
+    const jdk = rows.filter(r => r.jdk).length;
+    const show = el('input', { type: 'checkbox' });
+    const fill = () => box.replaceChildren(table(cols, show.checked ? rows : rows.filter(r => !r.jdk)));
+    show.onchange = fill;
+    fill();
+    return el('div', null, jdk ? el('label', { class: 'toolbar' }, show, t('owners.showJdk', num(jdk))) : null, box);
+  }
+
   // <details> whose content is built on first open (long stack traces)
   function lazyDetails(summaryAttrs, build) {
     const d = el('details', null, el('summary', summaryAttrs));
@@ -450,20 +468,31 @@ const DATA = /*DATA*/;
 
   // ======================== Diagnóstico ========================
   layer('layer.diagnosis');
+  if (INS.executive?.length) section('executive', t('section.executive'), t('note.executive')).append(
+    el('div', { class: 'card' }, el('ul', { class: 'health' }, ...INS.executive.map(x => el('li', { text: say(x) })))));
   if (full) {
     const SEV = { critical: ['--critical', '"✖"'], warning: ['--warning', '"▲"'], info: ['--series-1', '"●"'] };
     const hs = DATA.health || [];
-    section('health', t('section.health'), t('note.health')).append(el('div', { class: 'card' }, hs.length
-      ? el('ul', { class: 'health' }, ...hs.map(h => el('li', null, el('a', { href: '#' + h.anchor },
+    const TH = DATA.thresholds || {};
+    const fmtTh = v => String(v); // JSON keeps 1000.0 as 1000 and 0.1 as 0.1
+    const limit = k => k && TH[k] != null ? `${t('health.threshold')}: ${k} = ${fmtTh(TH[k])}` : null;
+    const hsec = section('health', t('section.health'), t('note.health'));
+    hsec.append(el('div', { class: 'card' }, hs.length
+      ? el('ul', { class: 'health' }, ...hs.map(h => el('li', null, el('a', limit(h.threshold) ? { href: '#' + h.anchor, title: limit(h.threshold) } : { href: '#' + h.anchor },
           el('span', { class: 'sev', style: `--c:var(${SEV[h.severity][0]});--icon:${SEV[h.severity][1]}`, text: t('health.' + h.severity) }),
-          el('span', { class: 'msg', text: t('health.' + h.key, ...h.args) })))))
+          el('span', { class: 'msg', text: t('health.' + h.key, ...h.args) }),
+          limit(h.threshold) ? el('span', { class: 'muted', style: 'font-size:12px', text: '(' + limit(h.threshold) + ')' }) : null))))
       : el('p', { class: 'muted', text: '✓ ' + t('health.ok') })));
+    const thRows = Object.entries(TH).map(([k, v]) => ({ k, v }));
+    if (thRows.length) hsec.append(el('details', null, el('summary', { text: t('health.thresholds') }),
+      table([{ h: t('col.threshold'), v: r => r.k, mono: true }, { h: t('summary.value'), v: r => r.v, f: fmtTh, num: true }], thRows)));
   }
   if (DATA.warnings?.length) {
     section('warnings', '⚠ ' + t('section.warnings'), t('note.warnings')).append(
       el('div', { class: 'card warn' }, el('ul', null, ...DATA.warnings.map(w => el('li', { text: w })))));
   }
-  section('summary', t('section.summary'), t('note.sizes')).append(el('div', { class: 'tiles' }, ...[
+  const sumSec = section('summary', t('section.summary'), t('note.sizes'));
+  sumSec.append(el('div', { class: 'tiles' }, ...[
     ['summary.file', bytes(s.fileSize)], ['summary.objects', num(s.objectCount)], ['summary.classes', num(s.classCount)],
     ['summary.instances', num(s.instanceCount)], ['summary.objectArrays', num(s.objectArrayCount)], ['summary.primitiveArrays', num(s.primitiveArrayCount)],
     ['summary.gcRoots', num(s.gcRootCount)], ['summary.totalShallow', bytes(s.totalShallow)],
@@ -471,6 +500,37 @@ const DATA = /*DATA*/;
     ['summary.unreachable', hasRetained ? bytes(s.totalShallow - s.reachableBytes) : '-'],
     ['summary.sizeModel', s.refSize ? t('summary.sizeModelValue', s.refSize) : '-'],
   ].map(([k, v]) => tile(t(k), v))));
+  const ctx = INS.context, sz = INS.sizing;
+  if (ctx || sz) {
+    sumSec.append(el('h3', { text: t('ctx.title') }), el('div', { class: 'tiles' },
+      ctx ? tile(t('ctx.title'), (ctx.afterOom ? '✖ ' : '✓ ') + t(ctx.afterOom ? 'ctx.afterOom' : 'ctx.noOom')) : null,
+      ctx?.live != null ? tile(t('summary.unreachable'), t(ctx.live ? 'ctx.live' : 'ctx.notLive')) : null,
+      sz ? tile(t('sizing.xmx'), t('sizing.range', bytes(sz.xmxMin), bytes(sz.xmxMax))) : null,
+      sz?.currentXmx ? tile(t('sizing.current'), bytes(sz.currentXmx)) : null,
+      sz?.directMin ? tile(t('sizing.direct'), bytes(sz.directMin)) : null));
+    if (ctx?.evidence?.length) sumSec.append(el('ul', null, ...ctx.evidence.map(x => el('li', { text: say(x) }))));
+    if (sz) sumSec.append(el('p', { class: 'note', style: 'margin-top:8px', text: t('note.sizing') }));
+  }
+
+  if (INS.suspects?.length) {
+    const ss = section('suspects', t('section.suspects'), t('note.suspects'));
+    const score = v => v.toLocaleString(LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    const top = INS.suspects.slice(0, 15);
+    originBar(ss, () => top.map(x => ({ name: x.className, value: x.score, x })), score,
+      d => `${t('col.retained')}: ${bytes(d.x.retained)} · ${t('col.staticHeld')}: ${frac(d.x.staticHeld)} · ${t('col.collectionHeld')}: ${frac(d.x.collectionHeld)}`,
+      barHeight(top.length));
+    ss.append(table([
+      { h: t('col.class'), v: r => r.className, mono: true },
+      { h: t('col.score'), v: r => r.score, f: score, num: true },
+      { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+      { h: t('col.instances'), v: r => r.instances, f: num, num: true },
+      { h: t('col.share'), v: r => r.share, f: frac, num: true },
+      { h: t('col.growth'), v: r => r.growth, f: frac, num: true },
+      { h: t('col.staticHeld'), v: r => r.staticHeld, f: frac, num: true },
+      { h: t('col.collectionHeld'), v: r => r.collectionHeld, f: frac, num: true },
+      { h: t('col.depth'), v: r => r.depth, f: frac, num: true },
+    ], INS.suspects, { benign: r => benignClass(r.className) }));
+  }
 
   const df = DATA.diff;
   if (df) {
@@ -555,6 +615,32 @@ const DATA = /*DATA*/;
 
   // ======================== Onde está a memória ========================
   layer('layer.memory');
+  const bg = INS.budget;
+  if (bg) {
+    const bs = section('budget', t('section.budget'), t('note.budget'));
+    // fixed categorical order by size; "Other" stays neutral gray
+    const cvar = (c, i) => c.name === '@budget.other' || i >= 7 ? '--neutral' : '--cat-' + (i + 1);
+    bs.append(el('div', { class: 'legend' }, ...bg.components.map((c, i) => el('span', { style: `--c:var(${cvar(c, i)})`, text: word(c.name) })),
+      el('span', { style: '--c:var(--seq-4)', text: t('budget.offHeap') })));
+    chart(bs, () => ({
+      textStyle: baseText(),
+      grid: { left: 12, right: 32, top: 8, bottom: 24, containLabel: true },
+      tooltip: tooltip({ trigger: 'item', formatter: p => `${esc(p.seriesName)}<br><b>${bytes(p.value)}</b>`
+        + (p.dataIndex === 0 ? ` (${pct(100 * p.value / (bg.total || 1))})` : '') }),
+      xAxis: { type: 'value', axisLabel: { color: css('--muted'), formatter: bytes }, splitLine: { lineStyle: { color: css('--grid') } } },
+      yAxis: { type: 'category', inverse: true, data: [t('budget.heap'), t('budget.offHeap')], axisLabel: { color: css('--text-2') },
+               axisTick: { show: false }, axisLine: { lineStyle: { color: css('--axis') } } },
+      series: [...bg.components.map((c, i) => ({ type: 'bar', stack: 'mem', name: word(c.name), data: [c.bytes, null], barWidth: 28,
+          itemStyle: { color: css(cvar(c, i)), borderColor: css('--surface'), borderWidth: 2 } })),
+        { type: 'bar', stack: 'mem', name: t('budget.offHeap'), data: [null, bg.offHeap], barWidth: 28,
+          itemStyle: { color: css('--seq-4'), borderRadius: [0, 4, 4, 0] } }],
+    }), 150);
+    bs.append(table([
+      { h: t('col.component'), v: r => word(r.name) },
+      { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
+      { h: t('col.percent'), v: r => 100 * r.bytes / (bg.total || 1), f: pct, num: true },
+    ], bg.components));
+  }
   if (DATA.dominatorTree) {
     const tm = section('dominators', t('section.dominators'), t('note.dominators'));
     chart(tm, () => ({
@@ -621,6 +707,12 @@ const DATA = /*DATA*/;
       rs.append(dTable);
       showTable();
     }
+    if (INS.staticCollections?.length) rs.append(el('h3', { text: t('retained.staticCollections') }), table([
+      { h: t('col.field'), v: r => r.owner, mono: true },
+      { h: t('col.type'), v: r => r.type, mono: true },
+      { h: t('col.size'), v: r => r.size, f: num, num: true },
+      { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
+    ], INS.staticCollections));
   }
 
   section('objects', t('section.objects')).append(table([
@@ -674,7 +766,7 @@ const DATA = /*DATA*/;
     const d = oh.direct;
     os.append(el('div', { class: 'tiles' },
       tile(t('offheap.owners'), `${bytes(d.ownerBytes)} (${num(d.owners)})`),
-      tile(t('offheap.views'), `${bytes(d.viewBytes)} (${num(d.views)})`),
+      tile(t('offheap.views'), `${bytes(d.viewBytes)} (${num(d.views)} → ${t('offheap.viewOwners', num(d.viewOwners || 0))})`),
       tile(t('offheap.mapped'), `${bytes(d.mappedBytes)} (${num(d.mapped)})`)));
     if (oh.netty) os.append(el('p', { text: t('offheap.netty', num(oh.netty.chunks), bytes(oh.netty.allocated), bytes(oh.netty.used)) }));
     os.append(el('h3', { text: t('offheap.heapVsOff') }));
@@ -752,6 +844,7 @@ const DATA = /*DATA*/;
     const rs = section('references', t('section.references'), t('note.references'));
     rs.append(el('div', { class: 'tiles' },
       tile(t('refs.finalizerQueue'), rf.finalizerQueue == null ? t('misc.unknown') : num(rf.finalizerQueue)),
+      INS.softOnlyBytes != null ? tile(t('refs.softOnly'), bytes(INS.softOnlyBytes)) : null,
       ...rf.kinds.map(k => tile(k.kind, num(k.count)))));
     if (rf.kinds.length) chart(rs, () => hbar(rf.kinds.map(k => ({ name: k.kind, value: k.referentBytes })), bytes), barHeight(rf.kinds.length));
     rs.append(table([
@@ -784,6 +877,17 @@ const DATA = /*DATA*/;
       { h: t('col.capacity'), v: r => r.capacity, f: num, num: true },
       { h: t('col.unused'), v: r => r.unusedBytes, f: bytes, num: true },
     ], w.collections || []));
+    if (INS.wasteByOwner?.length) {
+      sub('waste.byOwner');
+      ws.append(ownerTable(INS.wasteByOwner, [
+        { h: t('col.field'), v: r => r.owner, mono: true },
+        { h: t('col.type'), v: r => r.type, mono: true },
+        { h: t('col.count'), v: r => r.count, f: num, num: true },
+        { h: t('col.size'), v: r => r.size, f: num, num: true },
+        { h: t('col.capacity'), v: r => r.capacity, f: num, num: true },
+        { h: t('col.unused'), v: r => r.unusedBytes, f: bytes, num: true },
+      ]));
+    }
     sub('waste.fill');
     chart(ws, () => vbar(w.fillRatio.map(b => ({ name: b.label, value: b.count })), num), 260);
     sub('waste.sizes');
@@ -838,6 +942,7 @@ const DATA = /*DATA*/;
     const o = w.overhead;
     chart(ws, () => parts([
       { name: t('overhead.data'), value: o.data }, { name: t('overhead.header'), value: o.header }, { name: t('overhead.padding'), value: o.padding },
+      { name: t('overhead.classes'), value: o.classes || 0 },
     ], bytes), 110);
 
     sub('waste.strings');
@@ -855,19 +960,30 @@ const DATA = /*DATA*/;
     ], st.prefixes || []));
   }
 
-  if (full) section('strings', t('section.strings')).append(table([
-    { h: t('col.value'), v: r => r.value, f: v => JSON.stringify(v), mono: true },
-    { h: t('col.copies'), v: r => r.count, f: num, num: true },
-    { h: t('col.bytesEach'), v: r => r.bytesEach, f: bytes, num: true },
-    { h: t('col.wasted'), v: r => r.wasted, f: bytes, num: true },
-  ], DATA.duplicateStrings));
+  if (full) {
+    const strSec = section('strings', t('section.strings'));
+    const dt = DATA.duplicateStringsTotal;
+    if (dt) strSec.append(el('div', { class: 'tiles', style: 'margin-bottom:12px' },
+      tile(t('strings.totalValues'), num(dt.values)), tile(t('strings.totalCopies'), num(dt.copies)), tile(t('strings.totalWasted'), bytes(dt.wasted))));
+    strSec.append(table([
+      { h: t('col.value'), v: r => r.value, f: v => JSON.stringify(v), mono: true },
+      { h: t('col.copies'), v: r => r.count, f: num, num: true },
+      { h: t('col.bytesEach'), v: r => r.bytesEach, f: bytes, num: true },
+      { h: t('col.wasted'), v: r => r.wasted, f: bytes, num: true },
+    ], DATA.duplicateStrings));
+    if (INS.stringsByOwner?.length) strSec.append(el('h3', { text: t('strings.byOwner') }), ownerTable(INS.stringsByOwner, [
+      { h: t('col.field'), v: r => r.owner, mono: true },
+      { h: t('col.excessCopies'), v: r => r.copies, f: num, num: true },
+      { h: t('col.wasted'), v: r => r.bytes, f: bytes, num: true },
+    ]));
+  }
   section('arrays', t('section.arrays')).append(table([
     { h: t('col.id'), v: r => r.id, mono: true },
     { h: t('col.type'), v: r => r.className, mono: true },
     { h: t('col.length'), v: r => r.length, f: num, num: true },
     { h: t('col.bytes'), v: r => r.bytes, f: bytes, num: true },
     { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
-  ], DATA.largestArrays));
+  ], DATA.largestArrays, { benign: r => r.unreachable ? 'arrays.unreachable' : null }));
 
   // ======================== Runtime ========================
   layer('layer.runtime');
@@ -929,7 +1045,7 @@ const DATA = /*DATA*/;
       { h: t('col.max'), v: r => r.max, f: num, num: true },
       { h: t('col.threads'), v: r => r.threads, f: num, num: true },
       { h: t('col.queue'), v: r => r.queueType, mono: true },
-      { h: t('col.unbounded'), v: r => r.unbounded == null ? null : (r.unbounded ? t('misc.yes') : t('misc.no')) },
+      { h: t('col.unbounded'), v: r => r.scheduled ? t('conc.scheduled') : r.unbounded == null ? null : (r.unbounded ? t('misc.yes') : t('misc.no')) },
       { h: t('col.queued'), v: r => r.queued, f: num, num: true },
       { h: t('col.completed'), v: r => r.completed, f: num, num: true },
     ], cc.pools));
@@ -1028,16 +1144,27 @@ const DATA = /*DATA*/;
   }
 
   if (full) {
-    section('loaders', t('section.loaders')).append(table([
+    const ldSec = section('loaders', t('section.loaders'));
+    ldSec.append(table([
       { h: t('col.id'), v: r => r.id, mono: true },
       { h: t('col.class'), v: r => r.className, mono: true },
       { h: t('col.classesLoaded'), v: r => r.classesLoaded, f: num, num: true },
       { h: t('col.retained'), v: r => r.retained, f: bytes, num: true },
     ], DATA.classLoaders));
+    if (INS.duplicateClasses?.length) ldSec.append(el('h3', { text: t('loaders.duplicate') }), table([
+      { h: t('col.class'), v: r => r.name, mono: true },
+      { h: t('col.loaders'), v: r => r.loaders, f: num, num: true },
+    ], INS.duplicateClasses));
     const gr = section('gcroots', t('section.gcRoots'));
     chart(gr, () => hbar(DATA.gcRoots.map(g => ({ name: g.name, value: g.count })), num), barHeight(DATA.gcRoots.length));
     gr.append(table([{ h: t('col.type'), v: r => r.name }, { h: t('col.count'), v: r => r.count, f: num, num: true }], DATA.gcRoots));
   }
+
+  if (INS.libraries?.length) section('libraries', t('section.libraries'), t('note.libraries')).append(table([
+    { h: t('col.library'), v: r => (r.versions.length > 1 ? '⚠ ' : '') + r.name, mono: true },
+    { h: t('col.versions'), v: r => r.versions.join(', '), mono: true },
+    { h: t('col.jars'), v: r => r.jars.join(', '), mono: true },
+  ], INS.libraries));
 
   const gs = DATA.graph;
   if (gs) {
@@ -1096,7 +1223,8 @@ const DATA = /*DATA*/;
     chart(ms, () => hbar(md.records.map(r => ({ name: r.name, value: r.count })), num), barHeight(md.records.length));
   }
 
-  main.append(el('footer', { class: 'note', text: t('report.generatedBy', s.toolVersion) }));
+  main.append(el('footer', { class: 'note' }, t('report.generatedBy', s.toolVersion), ' · ',
+    el('a', { href: PROJECT_URL, target: '_blank', rel: 'noopener', text: PROJECT_URL.replace('https://', '') })));
   nav.querySelector('.brand').textContent = 'hprof-analyzer ' + s.toolVersion;
   addEventListener('resize', () => charts.forEach(c => c.inst && c.inst.resize()));
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => charts.forEach(c => c.inst && draw(c)));

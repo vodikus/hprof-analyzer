@@ -67,8 +67,16 @@ data class HeapReport(
     val vmThreads: String = "",
     /** Detail of the objects cited in the report, by id (HTML panel). */
     val objects: Map<String, ObjectDetail> = emptyMap(),
+    /** Automatic analyses: executive summary, memory budget, suspects, libraries... (full report only). */
+    val insights: Insights? = null,
     /** Sections restricted to application classes; rendered as a separate report, not embedded. */
     @Transient val app: AppView? = null,
+    /** Health rule thresholds in effect (defaults merged with `--threshold`). */
+    val thresholds: Map<String, Double> = emptyMap(),
+    /** Totals over every duplicated string; [duplicateStrings] is only the top N. */
+    val duplicateStringsTotal: DupTotal? = null,
+    /** Set when redacting: removed from every rendered output by [scrub]. */
+    @Transient val secrets: Secrets? = null,
     /** Every class (not only the top N); written to the snapshot only. */
     @Transient val histogram: List<ClassStat> = emptyList(),
     /** Biggest collections by path signature; written to the snapshot only. */
@@ -106,9 +114,10 @@ fun HeapReport.appOnly(): HeapReport {
     val a = app ?: error("no application view")
     return copy(classes = a.classes, packages = a.packages, retainedObjects = a.retainedObjects, dominatorTree = null,
         leaks = a.leaks, gcRoots = emptyList(), threads = a.threads, duplicateStrings = emptyList(),
-        largestArrays = a.largestArrays, classLoaders = emptyList(), proxies = a.proxies, appScope = a.scope, app = null,
+        largestArrays = a.largestArrays, classLoaders = emptyList(), duplicateStringsTotal = null, proxies = a.proxies, appScope = a.scope, app = null,
         waste = null, references = null, offHeap = null, health = emptyList(), leakSuspects = null, mergedPaths = emptyList(),
-        retainedViews = null, concurrency = null, graph = null, inspections = emptyList(), metadata = null, diff = null)
+        retainedViews = null, concurrency = null, graph = null, inspections = emptyList(), metadata = null, diff = null,
+        insights = null)
 }
 
 @Serializable
@@ -189,11 +198,15 @@ data class ThreadInfo(
 @Serializable
 data class Frame(val text: String, val locals: List<String>)
 
+/** All duplicated strings (not only the top N): excess copies and the bytes they take. */
+@Serializable
+data class DupTotal(val values: Int, val copies: Long, val wasted: Long)
+
 @Serializable
 data class DupString(val value: String, val count: Int, val bytesEach: Long, val wasted: Long)
 
 @Serializable
-data class ArrayStat(val id: String, val className: String, val length: Int, val bytes: Long, val retained: Long?)
+data class ArrayStat(val id: String, val className: String, val length: Int, val bytes: Long, val retained: Long?, val unreachable: Boolean = false)
 
 @Serializable
 data class LoaderStat(val id: String, val className: String, val classesLoaded: Int, val retained: Long?)
@@ -206,6 +219,8 @@ class Options(
     val appPackages: Set<String> = emptySet(),
     /** Mask user/machine properties, program arguments and secret-looking values in the report. */
     val redact: Boolean = true,
+    /** Health rule thresholds (see [DEFAULT_THRESHOLDS], `--threshold`). */
+    val thresholds: Map<String, Double> = DEFAULT_THRESHOLDS,
     val msg: Messages = Messages.load(),
     val log: (String) -> Unit = { System.err.println(it) },
 )
@@ -216,6 +231,7 @@ internal const val MAX_DEDUP_STRING = 1024
 private const val MAX_STRING_SHOWN = 200
 private const val SUSPECTS = 10
 private const val MERGED_CLASSES = 5
+private const val SUSPECT_CLASSES = 30
 private val MEMORY_FLAG = Regex("GC|Heap|RAM|Metaspace|Size|Ratio|Oops")
 
 private class IntList(cap: Int) {
@@ -234,7 +250,9 @@ internal class StrAcc(var count: Int, val bytes: Long)
 /** Index arrays built by the main pass; index [n] is the virtual GC root. [dom]/[retained] are null with --no-retained. */
 internal class Heap(
     val graph: HeapGraph, val n: Int, val ids: LongArray, val clsOf: IntArray, val classNames: List<String>,
-    val loaderOf: IntArray, val dom: Dominators?, val retained: LongArray?,
+    val loaderOf: IntArray, val dom: Dominators?, val retained: LongArray?, val shallow: LongArray,
+    /** Redacts heap strings (see [scrub]); applied before any truncation. */
+    val clean: (String) -> String = { it },
 ) {
     private val classLabels = HashMap<Int, String>()
 
@@ -272,14 +290,22 @@ internal fun <T> topN(n: Int, items: Sequence<T>, key: (T) -> Long): List<T> {
     return pq.sortedByDescending(key)
 }
 
+/** Hidden-class suffixes of lambdas change on every run: `Foo$$Lambda+0x...`, `Foo$$Lambda/0x...`, `Foo$$Lambda$12/0x...`. */
+private const val LAMBDA = "\$\$Lambda"
+private val LAMBDA_SUFFIX = Regex(Regex.escape(LAMBDA) + "(?:\\$\\d+)?(?:[+/]0x[0-9a-fA-F]+)?")
+
+/** Class name stable across dumps: lambda/hidden class addresses removed (`Foo$$Lambda`). */
+internal fun normalizeClassName(name: String): String =
+    if (LAMBDA in name) LAMBDA_SUFFIX.replace(name) { LAMBDA } else name
+
 internal fun HeapObject.className(): String = when (this) {
     is HeapClass -> "java.lang.Class"
-    is HeapInstance -> instanceClassName
-    is HeapObjectArray -> arrayClassName
+    is HeapInstance -> normalizeClassName(instanceClassName)
+    is HeapObjectArray -> normalizeClassName(arrayClassName)
     is HeapPrimitiveArray -> arrayClassName
 }
 
-internal fun HeapObject.label(): String = if (this is HeapClass) "class $name" else className()
+internal fun HeapObject.label(): String = if (this is HeapClass) "class ${normalizeClassName(name)}" else className()
 
 // ponytail: 64-bit HotSpot with compressed class pointers (default): 12 B instance header, 16 B array header, 8 B
 // alignment; references 4 B with compressed oops. Wrong for -XX:-UseCompressedClassPointers, ObjectAlignmentInBytes != 8
@@ -382,6 +408,30 @@ internal fun redactProps(props: Map<String, String>): Map<String, String> = prop
     }
 }
 
+/** Values that must not leave the machine in any string of the report (paths, thread names, object fields...). */
+class Secrets(val home: String?, val user: String?)
+
+private const val USER = "‹user›"
+
+/**
+ * Replaces the home directory (in every spelling: `\`, `/`, JSON-escaped `\\`) by `~` and the user name, as a whole
+ * word, by ‹user›. Values shorter than 3 characters are left alone (too likely to hit unrelated text).
+ */
+internal fun scrub(text: String, s: Secrets): String {
+    var t = text
+    s.home?.takeIf { it.length >= 3 }?.let { h ->
+        listOf(h, h.replace('\\', '/'), h.replace('/', '\\'), h.replace("\\", "\\\\"), h.replace('/', '\\').replace("\\", "\\\\"))
+            .distinct().sortedByDescending { it.length }.forEach { t = t.replace(it, "~", ignoreCase = true) }
+    }
+    s.user?.takeIf { it.length >= 3 }?.let { u ->
+        t = Regex("(?<![\\p{L}\\p{N}_])" + Regex.escape(u) + "(?![\\p{L}\\p{N}_])", RegexOption.IGNORE_CASE).replace(t, USER)
+    }
+    return t
+}
+
+/** [text] with the report's secrets removed (no-op with `--no-redact`). */
+fun HeapReport.scrub(text: String): String = secrets?.let { scrub(text, it) } ?: text
+
 /** `-Dkey=value` / `--opt=value` with a secret-looking key get the value masked. */
 internal fun redactArgs(args: List<String>): List<String> = args.map { a ->
     val eq = a.indexOf('=')
@@ -411,8 +461,8 @@ private val FRAMEWORKS = listOf(
 
 // ponytail: fixed list of JDK/language/framework/library roots; unknown third-party libs count as application
 // in auto mode. --app-package (or a main class outside these roots) gives the exact view.
-private val JDK_PREFIXES = listOf("java", "javax", "jdk", "sun", "com.sun", "org.jcp", "org.w3c", "org.xml", "org.ietf")
-private val LIB_PREFIXES = JDK_PREFIXES + listOf(
+internal val JDK_PREFIXES = listOf("java", "javax", "jdk", "sun", "com.sun", "org.jcp", "org.w3c", "org.xml", "org.ietf")
+internal val LIB_PREFIXES = (JDK_PREFIXES + listOf(
     "jakarta", "kotlin", "kotlinx", "scala", "groovy", "org.codehaus.groovy",
     "org.springframework", "org.apache", "org.hibernate", "io.netty", "io.quarkus", "io.smallrye", "io.micronaut",
     "io.vertx", "io.undertow", "org.xnio", "org.jboss", "org.wildfly", "org.eclipse", "org.glassfish", "com.fasterxml",
@@ -421,19 +471,22 @@ private val LIB_PREFIXES = JDK_PREFIXES + listOf(
     "io.lettuce", "redis.clients", "io.grpc", "io.opentelemetry", "io.prometheus", "okhttp3", "okio", "com.squareup",
     "org.yaml", "org.objectweb", "org.json", "org.joda", "com.github.benmanes", "io.ktor", "org.jetbrains",
     "org.intellij", "org.gradle", "worker.org.gradle", "net.rubygrapefruit", "org.junit", "org.opentest4j", "com.esotericsoftware", "shark",
-).map { "$it." }
+)).map { "$it." }
 
 internal fun isLibraryClass(name: String) = LIB_PREFIXES.any { name.startsWith(it) }
 
 /**
- * Rules for coloring class/package names by origin in the HTML (same logic as [isAppClass]): [app] are the effective
- * application prefixes (empty = everything outside [lib] is application), [generated] the generator name markers.
+ * Rules for coloring class/package names by origin in the HTML (same logic as [isAppClass]): [jdk] and [lib] are
+ * disjoint prefix lists, [app] the effective application prefixes (empty = auto mode: everything outside [jdk] and
+ * [lib] is application), [generated] the generator name markers.
  */
 @Serializable
 data class Origins(val jdk: List<String>, val lib: List<String>, val app: List<String>, val generated: List<String>)
 
-internal fun origins(app: List<String>) =
-    Origins(JDK_PREFIXES.map { "$it." }, LIB_PREFIXES, app.map { "$it." }, GENERATORS.map { it.second } + "\$\$")
+internal fun origins(app: List<String>): Origins {
+    val jdk = JDK_PREFIXES.map { "$it." }
+    return Origins(jdk, LIB_PREFIXES - jdk.toSet(), app.map { "$it." }, GENERATORS.map { it.second } + "\$\$")
+}
 
 /** Known-harmless findings: class name prefix → i18n key of the reason. Shown dimmed, never on top. */
 internal val BENIGN = mapOf(
@@ -444,6 +497,9 @@ internal val BENIGN = mapOf(
     "sun.util.locale.LocaleObjectCache" to "benign.localeCache",
     "java.lang.invoke.MethodType\$ConcurrentWeakInternSet" to "benign.methodType",
     "java.lang.invoke.MethodType" to "benign.methodType",
+    "sun.security.ssl.X509TrustManagerImpl" to "benign.trustStore",
+    "nl.altindag.ssl.trustmanager.JdkX509ExtendedTrustManager" to "benign.trustStore",
+    "nl.altindag.ssl.trustmanager.AggregatedX509ExtendedTrustManager" to "benign.trustStore",
 )
 
 internal fun benignReason(className: String): String? = BENIGN.entries.firstOrNull { className.startsWith(it.key) }?.value
@@ -509,8 +565,8 @@ internal fun detectAppPrefixes(command: String?): List<String> {
     return listOf(main.substringBeforeLast('.').split('.').take(3).joinToString("."))
 }
 
-private fun HeapObject.detail(): String? = when {
-    this is HeapInstance && instanceClassName == "java.lang.String" -> readAsJavaString()?.take(MAX_STRING_SHOWN)
+private fun HeapObject.detail(clean: (String) -> String): String? = when {
+    this is HeapInstance && instanceClassName == "java.lang.String" -> readAsJavaString()?.let(clean)?.take(MAX_STRING_SHOWN)
     this is HeapInstance && instanceOf("java.lang.Thread") -> threadField("name")?.readAsJavaString()
     else -> null
 }
@@ -540,6 +596,9 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             FRAMEWORKS.filter { graph.findClassByName(it.second) != null }.map { it.first }
         }
         val appPrefixes = opt.appPackages.toList().ifEmpty { detectAppPrefixes(jvm["sun.java.command"]) }
+        // redact heap strings before any truncation (a cut "C:/Users/re" would no longer match the user name)
+        val secrets = if (opt.redact) Secrets(jvm["user.home"], jvm["user.name"]) else null
+        val clean: (String) -> String = { text -> secrets?.let { scrub(text, it) } ?: text }
         fun isApp(name: String) = isAppClass(name, appPrefixes)
 
         // ---- single pass: histogram, references, strings, class loaders ----
@@ -583,8 +642,8 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             check(idx in 0 until n) { "objectIndex out of range: $idx" }
             ids[idx] = obj.objectId
             val name = when (obj) {
-                is HeapInstance -> classNameById.getOrPut(obj.instanceClassId) { obj.instanceClassName }
-                is HeapObjectArray -> classNameById.getOrPut(obj.arrayClassId) { obj.arrayClassName }
+                is HeapInstance -> classNameById.getOrPut(obj.instanceClassId) { normalizeClassName(obj.instanceClassName) }
+                is HeapObjectArray -> classNameById.getOrPut(obj.arrayClassId) { normalizeClassName(obj.arrayClassName) }
                 else -> obj.className()
             }
             val acc = accByName.getOrPut(name) { classAccs.add(Acc(name)); classAccs.size - 1 }
@@ -597,6 +656,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
 
             when (obj) {
                 is HeapClass -> {
+                    waste.classObject(size)
                     for (f in obj.readStaticFields()) if (f.value.isNonNullReference) addEdge(idx, f.value.asNonNullObjectId!!)
                     val loaderId = obj.readRecord().classLoaderId
                     loaderOf[idx] = loaderIdx(loaderId)
@@ -699,7 +759,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             if (dom != null) topN(top, dom.order.asSequence().drop(1).filter(filter)) { retained!![it] } else emptyList()
         fun objectStats(idxs: List<Int>) = idxs.map { idx ->
             val o = graph.findObjectById(ids[idx])
-            ObjectStat(hex(o.objectId), o.label(), shallow[idx], retained!![idx], o.detail())
+            ObjectStat(hex(o.objectId), o.label(), shallow[idx], retained!![idx], o.detail(clean))
         }
         val topRetained = retainedTop { true }
         // instances only: a class object is accounted to java.lang.Class, never an application class
@@ -733,7 +793,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val duplicateStrings = guard("section.strings", emptyList()) {
             topN(top, strings.entries.asSequence().filter { it.value.count > 1 }) {
                 (it.value.count - 1) * it.value.bytes
-            }.map { DupString(it.key.take(MAX_STRING_SHOWN), it.value.count, it.value.bytes, (it.value.count - 1) * it.value.bytes) }
+            }.map { DupString(clean(it.key).take(MAX_STRING_SHOWN), it.value.count, it.value.bytes, (it.value.count - 1) * it.value.bytes) }
         }
 
         fun arrayStats(idxs: Sequence<Int>) =
@@ -744,7 +804,9 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
                     is HeapPrimitiveArray -> o.byteSize / o.primitiveType.byteSize
                     else -> 0
                 }
-                ArrayStat(hex(o.objectId), o.className(), length, shallow[idx], retained?.get(idx))
+                // not strongly reachable (allocator filler, discarded copies): garbage, retained is meaningless
+                val unreachable = bfs.parent[idx] < 0
+                ArrayStat(hex(o.objectId), o.className(), length, shallow[idx], if (unreachable) null else retained?.get(idx), unreachable)
             }
         val arrays = guard("section.arrays", emptyList()) {
             arrayStats((graph.objectArrays + graph.primitiveArrays).map { it.objectIndex })
@@ -766,7 +828,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
 
         // ---- waste / references / off-heap (collected in the main pass) ----
         opt.log(opt.msg["log.waste"])
-        val wasteReport = guard("section.waste", null) { waste.result(top, strings) }
+        val wasteReport = guard("section.waste", null) { waste.result(top, strings, bfs.parent, clean) }
         val refReport = guard("section.references", null) { refs.result(top) }
         val offHeapReport = guard("section.offHeap", null) { offHeap.result() }
         val concurrency = guard("section.concurrency", null) { conc.result(graph, retained, threads, tlValues, top) }
@@ -774,7 +836,7 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         // ---- leak detection, merged paths, aggregated retained ----
         opt.log(opt.msg["log.leaks"])
         val leakSuspects = guard("section.leaks", null) { leakSuspects(file, graph, opt.leakClasses, top) }
-        val heap = Heap(graph, n, ids, clsOf, classAccs.map { it.name }, loaderOf, dom, retained)
+        val heap = Heap(graph, n, ids, clsOf, classAccs.map { it.name }, loaderOf, dom, retained, shallow, clean)
         val rootTypes = HashMap<Int, String>()
         for (r in graph.gcRoots) graph.findObjectByIdOrNull(r.id)?.let { rootTypes.putIfAbsent(graph.indexOf(it), r::class.simpleName ?: "?") }
         val pathCollections = guard("section.diff", emptyList()) { collectionsByPath(heap, bfs.parent, rootTypes, waste.bigCollections()) }
@@ -863,17 +925,30 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         val report = HeapReport(summary, classStats(classAccs), packageStats(classAccs), retainedObjects, tree, leaks, gcRoots,
             threads, duplicateStrings, arrays, classLoaders, warnings,
             if (opt.redact) redactProps(jvm) else jvm, if (opt.redact) redactArgs(vmArgs) else vmArgs, frameworks,
-            redacted = opt.redact, origins = origins(appPrefixes), benign = BENIGN, vmThreads = VM_THREAD.pattern,
+            redacted = opt.redact, secrets = secrets,
+            duplicateStringsTotal = strings.values.filter { it.count > 1 }.let { dups ->
+                DupTotal(dups.size, dups.sumOf { it.count - 1L }, dups.sumOf { (it.count - 1L) * it.bytes })
+            },
+            origins = origins(appPrefixes), benign = BENIGN, vmThreads = VM_THREAD.pattern,
             proxies = proxyReport { true }, waste = wasteReport, references = refReport, offHeap = offHeapReport,
             leakSuspects = leakSuspects, mergedPaths = mergedPaths, retainedViews = retainedViews, concurrency = concurrency,
             graph = graphShape, inspections = inspections, metadata = metadata, app = app, pathCollections = pathCollections,
             histogram = classAccs.sortedByDescending { it.shallow }
                 .map { ClassStat(it.name, it.count, it.shallow, if (opt.retained) it.retained else null) })
+        opt.log(opt.msg["log.insights"])
+        val classAcc = accByName["java.lang.Class"]
+        // JDK classes and arrays are the content, not the cause: score the application/library classes holding them
+        val candidates = (classAccs.indices.filter { it != classAcc && component(classAccs[it].name, appPrefixes) != BUDGET_JDK && !classAccs[it].name.endsWith("]") }
+            .sortedByDescending { classAccs[it].retained }.take(SUSPECT_CLASSES) +
+            opt.leakClasses.mapNotNull { accByName[it] }).distinct()
+        val insights = insights(InsightInputs(heap, bfs, offsets, targets, appPrefixes, jvm, vmArgs, threads, inspections, offHeapReport,
+            waste, refs.softReferents, strings, summary, candidates, { classAccs[it].retained }, { classAccs[it].count }), opt, warnings)
+        val withInsights = report.copy(insights = insights, warnings = warnings.toList())
         val objects = guard("section.objects", emptyMap()) {
             // ids cited by both the full and the application-only report
-            objectDetails(heap, bfs.parent, rootTypes, shallow, Json.encodeToString(report) + Json.encodeToString(report.appOnly()))
+            objectDetails(heap, bfs.parent, rootTypes, shallow, Json.encodeToString(withInsights) + Json.encodeToString(withInsights.appOnly()))
         }
-        return report.copy(objects = objects, health = guard("section.health", emptyList()) { health(report) })
+        return guard("section.health", withInsights.copy(objects = objects)) { conclude(withInsights.copy(objects = objects), opt.thresholds) }
     }
 }
 

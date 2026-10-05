@@ -118,6 +118,7 @@ class AnalyzerTest {
         Holder.cache = java.util.concurrent.ConcurrentHashMap((1..200).associate { "k$it" to "v$it" })
         val gate = java.util.concurrent.CountDownLatch(1)
         val pool = java.util.concurrent.Executors.newFixedThreadPool(3)
+        val scheduler = java.util.concurrent.Executors.newScheduledThreadPool(1) // max = MAX_VALUE + DelayedWorkQueue by design
         repeat(23) { pool.execute { gate.await() } } // 3 running (identical stacks), 20 queued
         val threadLocal = ThreadLocal<ByteArray>().apply { set(ByteArray(1024)) }
         val liveErrors = List(3) { IllegalStateException("live") } // held by a stack frame: not pre-allocated
@@ -217,6 +218,39 @@ class AnalyzerTest {
             assertTrue(pre.collapsed && pre.rows.any { it[0] == "java.lang.RuntimeException" && it[1] == "boom" && it[2]!!.toInt() >= 5 },
                 "pre-allocated: ${pre.rows.take(5)}")
             assertEquals(3, liveErrors.size)
+
+            // item 3: automatic analyses
+            val ins = report.insights!!
+            val budget = ins.budget!!
+            assertEquals(report.summary.reachableBytes, budget.total, "budget adds up to the reachable heap")
+            assertTrue(budget.components.any { it.name == BUDGET_APP }, "budget: ${budget.components}")
+            assertTrue(ins.wasteByOwner.any { it.owner == "Holder.waste" && it.type == "ArrayList" && it.count >= 1000 }, "owners: ${ins.wasteByOwner.take(5)}")
+            assertTrue(ins.libraries.isNotEmpty(), "libraries from the test class path")
+            assertTrue(ins.suspects.isNotEmpty() && ins.suspects.zipWithNext().all { (a, b) -> a.score >= b.score }, "suspects: ${ins.suspects.take(3)}")
+            assertTrue(ins.suspects.none { it.className.startsWith("java.") || it.className.endsWith("]") })
+            assertEquals(false, ins.context!!.afterOom)
+            assertTrue(ins.sizing!!.xmxMin >= 3 * report.summary.reachableBytes!!)
+            assertEquals("exec.heap", ins.executive.first().key)
+
+            // analysis 002: consistency
+            val o = report.waste!!.overhead
+            assertEquals(report.summary.totalShallow, o.data + o.header + o.padding + o.classes, "overhead adds up to the shallow total")
+            assertTrue(report.concurrency!!.pools.any { it.scheduled && it.max == Int.MAX_VALUE }, "scheduled pool found")
+            assertEquals(0, report.concurrency!!.unboundedPools, "scheduled pools are not unbounded-pool findings")
+            assertTrue(ins.suspects.all { it.share <= 1.0 && it.share * report.summary.reachableBytes!! <= it.retained + 1 }, "share = retained / heap")
+            assertTrue(report.classes.none { "+0x" in it.name || "/0x" in it.name }, "lambda names normalized")
+            assertTrue(report.origins!!.lib.none { it in report.origins!!.jdk })
+
+            // analysis 003
+            assertTrue(report.largestArrays.filter { it.unreachable }.all { it.retained == null }, "unreachable arrays have no retained")
+            val total = report.duplicateStringsTotal!!
+            assertTrue(total.wasted >= report.duplicateStrings.sumOf { it.wasted } && total.copies > 0, "total covers the top N: $total")
+            // owners count excess copies on the same basis as their bytes: a subset of the total
+            assertTrue(ins.stringsByOwner.sumOf { it.copies } <= total.copies + ins.stringsByOwner.size, "owner copies vs total")
+            assertTrue(ins.stringsByOwner.sumOf { it.bytes } <= total.wasted + ins.stringsByOwner.size, "owner bytes vs total")
+            assertEquals(DEFAULT_THRESHOLDS, report.thresholds)
+            listOf("### Resumo executivo", "### Por onde começar", "### Orçamento de memória", "### Bibliotecas")
+                .forEach { assertContains(toMarkdown(report), it) }
             val g = report.graph!!
             assertTrue(g.fanIn.isNotEmpty() && g.depths.isNotEmpty() && g.classEdges.isNotEmpty())
             assertTrue(g.fanOut.first().degree >= 1000, "fan-out: ${g.fanOut.take(3)}")
@@ -253,7 +287,7 @@ class AnalyzerTest {
             assertContains(html, "echarts")
             assertTrue("/*DATA*/" !in html && "/*ECHARTS*/" !in html)
             assertContains(html, "LOCALE = \"pt-BR\"")
-            assertTrue(Regex("""\d+\.\d+\.\d+""").matches(VERSION), "version from build.gradle.kts: $VERSION")
+            assertTrue(Regex("""\d+\.\d+\.\d+(-[\w.]+)?""").matches(VERSION), "version from build.gradle.kts: $VERSION")
             assertEquals(VERSION, report.summary.toolVersion)
             assertContains(md, "hprof-analyzer $VERSION")
 
@@ -270,7 +304,7 @@ class AnalyzerTest {
             Holder.proxies = emptyList()
             Holder.waste = emptyList()
             Holder.cache = emptyMap()
-            gate.countDown(); pool.shutdown(); threadLocal.remove()
+            gate.countDown(); pool.shutdown(); scheduler.shutdown(); threadLocal.remove()
         }
     }
 
@@ -344,6 +378,71 @@ class AnalyzerTest {
         assertEquals(listOf(WARNING to "offHeapLarge", WARNING to "poolProliferation", INFO to "unboundedPools"),
             health(runtime).map { it.severity to it.key })
         assertEquals(listOf("12", "a.Pool"), health(runtime)[1].args)
+        assertEquals(listOf("offHeapRatio", "poolsPerClass", null), health(runtime).map { it.threshold }, "finding -> threshold key")
+        assertEquals(emptyList(), health(runtime, DEFAULT_THRESHOLDS + mapOf("poolsPerClass" to 50.0, "offHeapRatio" to 3.0))
+            .filter { it.key in setOf("poolProliferation", "offHeapLarge") }, "thresholds silence the rules")
+
+        val insightful = ok.copy(
+            summary = summary.copy(totalShallow = 2000),
+            insights = Insights(
+                duplicateClasses = listOf(DupClass("a.B", 2)), softOnlyBytes = 200,
+                staticCollections = listOf(StaticCollection("a.C.cache", "HashMap", 200_000, null)),
+                libraries = listOf(Library("guava", listOf("31", "33"), emptyList())),
+                context = DumpContext(true, emptyList(), false),
+            ),
+        )
+        assertEquals(listOf(CRITICAL to "afterOom", WARNING to "duplicateClasses", WARNING to "softRefs",
+            WARNING to "bigStaticCollection", WARNING to "libraryVersions", INFO to "unreachable"),
+            health(insightful).map { it.severity to it.key })
+        val noConflict = insightful.copy(insights = insightful.insights!!.copy(libraries = listOf(Library("guava", listOf("33"), emptyList()))))
+        assertEquals(INFO, health(noConflict).first { it.key == "duplicateClasses" }.severity, "plugin isolation without version conflict")
+        val concluded = conclude(insightful)
+        assertTrue(concluded.insights!!.executive.any { it.key == "exec.oom" })
+    }
+
+    @Test
+    fun insightHelpers() {
+        val libs = libraryList(listOf("guava-33.0.0-jre.jar", "guava-31.1-jre.jar", "jackson-databind-2.15.2.jar", "app.jar", "notes.txt"))
+        assertEquals(listOf("guava", "app", "jackson-databind"), libs.map { it.name })
+        assertEquals(listOf("31.1-jre", "33.0.0-jre"), libs.first().versions)
+        assertEquals(listOf("-"), libs[1].versions)
+
+        assertEquals(BUDGET_APP, component("com.acme.Order", emptyList()))
+        assertEquals("Spring", component("org.springframework.beans.Foo", emptyList()))
+        assertEquals(BUDGET_JDK, component("java.util.HashMap", emptyList()))
+        assertEquals(BUDGET_JDK, component("byte[]", emptyList()))
+        assertEquals(BUDGET_JDK, component("class java.lang.String", emptyList()))
+        assertEquals("com.other", component("com.other.lib.X", listOf("com.acme")))
+        assertEquals(BUDGET_GEN, component("com.acme.Order\$\$SpringCGLIB\$\$0", emptyList()))
+
+        assertEquals(2L * 1024 * 1024 * 1024, parseXmx(listOf("-Xms1g", "-Xmx2g")))
+        assertEquals(512L * 1024 * 1024, parseXmx(listOf("-XX:MaxHeapSize=536870912")))
+        val z = sizing(100L * 1024 * 1024, 0, emptyList())!!
+        assertEquals(320L * 1024 * 1024, z.xmxMin) // 300 MiB rounded up to 32 MiB
+        assertEquals(416L * 1024 * 1024, z.xmxMax)
+        assertEquals(null, z.directMin)
+        // 49.4 MiB of direct buffers x 1.5 = 74 MiB, rounded up to 32 MiB
+        assertEquals(96L * 1024 * 1024, sizing(30L * 1024 * 1024, (49.4 * 1024 * 1024).toLong(), emptyList())!!.directMin)
+
+        assertEquals("a.Foo\$\$Lambda", normalizeClassName("a.Foo\$\$Lambda+0x000001b0af0a49c8"))
+        assertEquals("a.Foo\$\$Lambda", normalizeClassName("a.Foo\$\$Lambda/0x0000000800c01234"))
+        assertEquals("a.Foo\$\$Lambda[]", normalizeClassName("a.Foo\$\$Lambda\$12/0x0000000800c01234[]"))
+        assertEquals("a.Foo", normalizeClassName("a.Foo"))
+
+        val secrets = Secrets("C:\\Users\\ana", "ana")
+        assertEquals("~\\app.jar", scrub("C:\\Users\\ana\\app.jar", secrets))
+        assertEquals("~/x ~\\\\y", scrub("C:/Users/ana/x C:\\\\Users\\\\ana\\\\y", secrets))
+        assertEquals("watchdog ‹user›: banana ana2", scrub("watchdog Ana: banana ana2", secrets))
+
+        val t = parseThresholds("poolsPerClass=20, softRefs=0.2").getOrThrow()
+        assertEquals(20.0, t["poolsPerClass"])
+        assertEquals(DEFAULT_THRESHOLDS["lowFill"], t["lowFill"])
+        assertTrue(parseThresholds("nope=1").isFailure && parseThresholds("lowFill=x").isFailure)
+
+        val base = SuspectScore("a.A", 0.0, 0, 0, share = 1.0, growth = 0.0, staticHeld = 1.0, collectionHeld = 0.0, depth = 0.0)
+        assertEquals(50.0, score(base, null).score)
+        val diffGrowing = DiffReport(emptyList(), listOf(Delta("a.A", listOf(1, 2, 3), listOf(1, 1, 1), 2, true)), emptyList(), emptyList())
+        assertEquals(75.0, score(base, diffGrowing).score)
     }
 
     @Test

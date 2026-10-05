@@ -148,7 +148,7 @@ internal fun inspectFrameworks(
         val groups = HashMap<Pair<String, String>, T>()
         val pre = HashMap<Pair<String, String>, T>()
         for (t in all) {
-            val message = t["java.lang.Throwable", "detailMessage"]?.value?.readAsJavaString()?.take(MAX_MESSAGE) ?: ""
+            val message = t["java.lang.Throwable", "detailMessage"]?.value?.readAsJavaString()?.let(h.clean)?.take(MAX_MESSAGE) ?: ""
             val target = if (isPreallocated(h, parent, rootTypes, graph.indexOf(t))) pre else groups
             target.getOrPut(t.instanceClassName to message) { T() }.let { it.count++; it.retained += retained(t) ?: 0 }
         }

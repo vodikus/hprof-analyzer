@@ -21,8 +21,8 @@ private const val MAX_HOPS = 8
 private const val MAX_LINKS = 40
 private const val MIN_SHARE = 0.02
 
-/** [parent]: BFS tree parent per node, -1 if unreachable (parent[root] = root). [depthCounts][d]: nodes d hops from the roots. */
-internal class Bfs(val parent: IntArray, val depthCounts: LongArray)
+/** [parent]: BFS tree parent per node, -1 if unreachable (parent[root] = root). [depthCounts][d]: nodes d hops from the roots; [depth]: hops per node. */
+internal class Bfs(val parent: IntArray, val depthCounts: LongArray, val depth: IntArray)
 
 /** BFS from the virtual root [root] over the CSR graph. */
 internal fun bfs(n: Int, root: Int, offsets: IntArray, targets: IntArray): Bfs {
@@ -46,7 +46,7 @@ internal fun bfs(n: Int, root: Int, offsets: IntArray, targets: IntArray): Bfs {
     }
     val counts = LongArray(maxDepth + 1)
     for (i in 1 until tail) counts[depth[queue[i]]]++ // depth 0 = virtual root, not counted
-    return Bfs(parent, counts)
+    return Bfs(parent, counts, depth)
 }
 
 internal fun mergedPaths(h: Heap, parent: IntArray, rootTypes: Map<Int, String>, accs: List<Int>): List<MergedPaths> = accs.map { acc ->
@@ -108,11 +108,11 @@ internal fun pathSignature(h: Heap, parent: IntArray, rootTypes: Map<Int, String
 }
 
 /** How object [p] references the object with id [childId]: "Class.field", "Class.static field" or "Type[]". */
-private fun edgeName(h: Heap, p: Int, childId: Long): String = when (val o = h.graph.findObjectById(h.ids[p])) {
+internal fun edgeName(h: Heap, p: Int, childId: Long): String = when (val o = h.graph.findObjectById(h.ids[p])) {
     is HeapObject.HeapInstance -> o.readFields().firstOrNull { it.value.asObjectId == childId }
-        ?.let { "${o.instanceClassSimpleName}.${it.name}" } ?: o.instanceClassSimpleName
+        ?.let { "${normalizeClassName(o.instanceClassSimpleName)}.${it.name}" } ?: normalizeClassName(o.instanceClassSimpleName)
     is HeapObject.HeapClass -> o.readStaticFields().firstOrNull { it.value.asObjectId == childId }
-        ?.let { "${o.simpleName}.${it.name}" } ?: o.simpleName
+        ?.let { "${normalizeClassName(o.simpleName)}.${it.name}" } ?: normalizeClassName(o.simpleName)
     is HeapObject.HeapObjectArray -> o.arrayClassName.substringAfterLast('.')
     is HeapObject.HeapPrimitiveArray -> o.arrayClassName
 }
@@ -148,7 +148,7 @@ private fun valueText(h: Heap, v: shark.HeapValue): FieldValue? {
             if (x.isNull) return null
             val o = h.graph.findObjectByIdOrNull(x.value)
             val str = (o as? HeapObject.HeapInstance)?.takeIf { it.instanceClassName == "java.lang.String" }?.readAsJavaString()
-            return FieldValue("", str?.let { "\"${it.take(MAX_VALUE)}\"" } ?: o?.label() ?: "?", hex(x.value))
+            return FieldValue("", str?.let { "\"${h.clean(it).take(MAX_VALUE)}\"" } ?: o?.label() ?: "?", hex(x.value))
         }
         is ValueHolder.BooleanHolder -> x.value.toString()
         is ValueHolder.CharHolder -> "'${x.value}'"
@@ -188,13 +188,21 @@ internal fun objectDetails(h: Heap, parent: IntArray, rootTypes: Map<Int, String
         var rootType: String? = null
         while (parent[cur] >= 0) {
             val p = parent[cur]
-            if (steps.size >= MAX_PATH) { steps.add(PathStep("", "…", null)); break }
+            if (steps.size >= MAX_PATH) {
+                steps.add(PathStep("", "…", null))
+                // keep climbing (without steps) so a truncated path still names its GC root type
+                var c = cur
+                var hops = 0
+                while (parent[c] >= 0 && parent[c] != h.n && hops++ < h.n) c = parent[c]
+                if (parent[c] == h.n) rootType = rootTypes[c] ?: "GC root"
+                break
+            }
             steps.add(PathStep(hex(h.ids[cur]), h.label(cur), if (p == h.n) null else edgeName(h, p, h.ids[cur])))
             if (p == h.n) { rootType = rootTypes[cur] ?: "GC root"; break }
             cur = p
         }
         out[key] = ObjectDetail(
-            className = o.label(), shallow = shallow[v], retained = h.retained?.get(v),
+            className = o.label(), shallow = shallow[v], retained = h.retained?.get(v)?.takeIf { parent[v] >= 0 },
             dominator = idom?.takeIf { it != h.n && it >= 0 }?.let { hex(h.ids[it]) },
             dominatorClass = idom?.let { if (it == h.n) GC_ROOT_LABEL else if (it >= 0) h.label(it) else null },
             fields = fields, length = length, rootType = rootType, path = steps.reversed(),

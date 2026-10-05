@@ -13,6 +13,8 @@ fun bytes(b: Long?, locale: Locale = Locale.ROOT): String {
     return String.format(locale, "%.1f %siB", v, units[i])
 }
 
+const val PROJECT_URL = "https://github.com/vodikus/hprof-analyzer"
+
 private fun md(s: String) = s.replace("|", "\\|").replace("\n", " ").replace("`", "'")
 
 /** System properties shown up front; the rest goes in a collapsed table. */
@@ -21,12 +23,17 @@ private val KEY_PROPS = listOf(
     "os.arch", "user.dir", "user.timezone", "file.encoding", "java.home", "sun.java.command",
 )
 
+/** 1000.0 → "1000", 0.1 → "0.1" (as typed in `--threshold`). */
+internal fun thresholdText(v: Double) = if (v % 1.0 == 0.0) v.toLong().toString() else v.toString()
+
 private fun mermaidLabel(s: String) = s.replace("\"", "#quot;").replace("<", "#lt;").replace(">", "#gt;")
 
 /** Report layers, conclusion first, evidence after (same order as the HTML). */
 private val LAYERS = listOf("layer.diagnosis", "layer.memory", "layer.retention", "layer.waste", "layer.runtime", "layer.appendix")
 
-fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildString {
+fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = r.scrub(markdown(r, msg))
+
+private fun markdown(r: HeapReport, msg: Messages): String = buildString {
     fun b(v: Long?) = bytes(v, msg.locale)
     fun n(v: Number?) = v?.let { String.format(msg.locale, "%,d", it) }
     fun table(headerKeys: List<String>, rows: List<List<Any?>>) {
@@ -51,7 +58,14 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         appendLine("```\n")
     }
 
+    /** Localized [Sentence]; '@key' args are translated too. */
+    fun say(x: Sentence) = msg.get(x.key, *x.args.map { if (it.startsWith('@')) msg[it.drop(1)] else it }.toTypedArray())
+    fun name(n: String) = if (n.startsWith('@')) msg[n.drop(1)] else n
+    fun pct(v: Double) = String.format(msg.locale, "%.0f%%", 100 * v)
+    fun jdkHidden(count: Int) { if (count > 0) appendLine("_${msg["owners.jdkHidden", count]}_\n") }
+
     val s = r.summary
+    val ins = r.insights
     val full = r.appScope == null // the application view drops sections that cannot be split by class
     appendLine("# ${md(msg["report.title", s.file])}\n")
     r.appScope?.let { appendLine("> ${md(msg["report.appScope", it])}\n") }
@@ -59,14 +73,26 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
 
     // ======== Diagnosis ========
     layer(LAYERS[0])
+    if (ins != null && ins.executive.isNotEmpty()) {
+        section("section.executive")
+        ins.executive.forEach { appendLine("- ${md(say(it))}") }
+        appendLine()
+    }
     if (full) {
         section("section.health")
         if (r.health.isEmpty()) appendLine("✅ ${msg["health.ok"]}\n")
+        fun limit(key: String) = r.thresholds[key]?.let { "`$key` = ${thresholdText(it)}" }
         r.health.forEach { h ->
             val icon = when (h.severity) { CRITICAL -> "🔴"; WARNING -> "🟠"; else -> "🔵" }
-            appendLine("- $icon **${msg["health.${h.severity}"]}**: ${md(msg.get("health.${h.key}", *h.args.toTypedArray()))}")
+            val rule = h.threshold?.let(::limit)?.let { " _(${msg["health.threshold"]}: $it)_" } ?: ""
+            appendLine("- $icon **${msg["health.${h.severity}"]}**: ${md(msg.get("health.${h.key}", *h.args.toTypedArray()))}$rule")
         }
         appendLine()
+        if (r.thresholds.isNotEmpty()) {
+            appendLine("<details><summary>${msg["health.thresholds"]}</summary>\n")
+            table(listOf("col.threshold", "summary.value"), r.thresholds.map { (k, v) -> listOf(k, thresholdText(v)) })
+            appendLine("</details>\n")
+        }
     }
     if (r.warnings.isNotEmpty()) {
         section("section.warnings")
@@ -94,6 +120,27 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         listOf(msg["summary.analysisTime"], "${n(s.analysisMillis)} ms"),
     ))
     appendLine("> ${msg["note.sizes"]}\n")
+    ins?.context?.let { c ->
+        sub("ctx.title")
+        appendLine("**${msg[if (c.afterOom) "ctx.afterOom" else "ctx.noOom"]}**" +
+            (c.live?.let { " · ${msg[if (it) "ctx.live" else "ctx.notLive"]}" } ?: "") + "\n")
+        c.evidence.forEach { appendLine("- ${md(say(it))}") }
+        if (c.evidence.isNotEmpty()) appendLine()
+    }
+    ins?.sizing?.let { z ->
+        table(listOf("summary.metric", "summary.value"), listOfNotNull(
+            listOf(msg["sizing.xmx"], msg["sizing.range", b(z.xmxMin), b(z.xmxMax)]),
+            z.currentXmx?.let { listOf(msg["sizing.current"], b(it)) },
+            z.directMin?.let { listOf(msg["sizing.direct"], b(it)) }))
+        appendLine("> ${msg["note.sizing"]}\n")
+    }
+    if (ins != null && ins.suspects.isNotEmpty()) {
+        section("section.suspects")
+        appendLine("> ${msg["note.suspects"]}\n")
+        table(listOf("col.class", "col.score", "col.retained", "col.instances", "col.share", "col.growth", "col.staticHeld", "col.collectionHeld", "col.depth"),
+            ins.suspects.map { listOf(cls(it.className), String.format(msg.locale, "%.1f", it.score), b(it.retained), n(it.instances),
+                pct(it.share), pct(it.growth), pct(it.staticHeld), pct(it.collectionHeld), pct(it.depth)) })
+    }
 
     r.diff?.let { d ->
         section("section.diff")
@@ -116,6 +163,13 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
 
     // ======== Where the memory is ========
     layer(LAYERS[1])
+    ins?.budget?.let { bg ->
+        section("section.budget")
+        appendLine("> ${msg["note.budget"]}\n")
+        table(listOf("col.component", "col.bytes", "col.percent"),
+            bg.components.map { listOf(name(it.name), b(it.bytes), pct(it.bytes.toDouble() / bg.total.coerceAtLeast(1))) } +
+                listOf(listOf("**${msg["budget.heap"]}**", b(bg.total), "100%"), listOf(msg["budget.offHeap"], b(bg.offHeap), "-")))
+    }
     r.retainedViews?.let { rv ->
         section("section.retainedViews")
         appendLine("> ${msg["note.retainedViews"]}\n")
@@ -128,6 +182,10 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         sub("retained.dominators")
         table(listOf("col.class", "col.dominator", "col.count", "col.retained"),
             rv.dominators.flatMap { c -> c.by.map { listOf(c.className, cls(it.className), n(it.count), b(it.retained)) } })
+        if (!ins?.staticCollections.isNullOrEmpty()) {
+            sub("retained.staticCollections")
+            table(listOf("col.field", "col.type", "col.size", "col.retained"), ins!!.staticCollections.map { listOf(it.owner, it.type, n(it.size), b(it.retained)) })
+        }
     }
 
     section("section.objects")
@@ -149,7 +207,7 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         val d = oh.direct
         table(listOf("col.type", "col.count", "col.bytes"), listOf(
             listOf(msg["offheap.owners"], n(d.owners), b(d.ownerBytes)),
-            listOf(msg["offheap.views"], n(d.views), b(d.viewBytes)),
+            listOf(msg["offheap.views"] + " " + msg["offheap.viewOwners", n(d.viewOwners)], n(d.views), b(d.viewBytes)),
             listOf(msg["offheap.mapped"], n(d.mapped), b(d.mappedBytes))))
         oh.netty?.let { appendLine(msg["offheap.netty", n(it.chunks), b(it.allocated), b(it.used)] + "\n") }
         sub("offheap.resources")
@@ -201,7 +259,8 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         appendLine("> ${msg["note.references"]}\n")
         table(listOf("col.type", "col.count", "col.withReferent", "col.referentBytes"),
             rf.kinds.map { listOf(it.kind, n(it.count), n(it.withReferent), b(it.referentBytes)) })
-        appendLine("**${msg["refs.finalizerQueue"]}:** ${rf.finalizerQueue?.let(::n) ?: msg["misc.unknown"]}\n")
+        appendLine("**${msg["refs.finalizerQueue"]}:** ${rf.finalizerQueue?.let(::n) ?: msg["misc.unknown"]}" +
+            (ins?.softOnlyBytes?.let { " · **${msg["refs.softOnly"]}:** ${b(it)}" } ?: "") + "\n")
         sub("refs.byClass")
         table(listOf("col.class", "col.count"), rf.byClass.map { listOf(it.name, n(it.count)) })
         sub("refs.finalizer")
@@ -220,6 +279,12 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         sub("waste.collections")
         table(listOf("col.type", "col.count", "col.empty", "col.emptyBytes", "col.size", "col.capacity", "col.unused"),
             w.collections.map { listOf(it.type, n(it.count), n(it.empty), b(it.emptyBytes), n(it.size), n(it.capacity), b(it.unusedBytes)) })
+        if (!ins?.wasteByOwner.isNullOrEmpty()) {
+            sub("waste.byOwner")
+            table(listOf("col.field", "col.type", "col.count", "col.size", "col.capacity", "col.unused"),
+                ins!!.wasteByOwner.filterNot { it.jdk }.map { listOf(it.owner, it.type, n(it.count), n(it.size), n(it.capacity), b(it.unusedBytes)) })
+            jdkHidden(ins.wasteByOwner.count { it.jdk })
+        }
         sub("waste.fill")
         table(listOf("col.size", "col.count"), w.fillRatio.map { listOf(it.label, n(it.count)) })
         sub("waste.sizes")
@@ -241,7 +306,8 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         sub("waste.overhead")
         val o = w.overhead
         table(listOf("summary.metric", "col.bytes"), listOf(
-            listOf(msg["overhead.data"], b(o.data)), listOf(msg["overhead.header"], b(o.header)), listOf(msg["overhead.padding"], b(o.padding))))
+            listOf(msg["overhead.data"], b(o.data)), listOf(msg["overhead.header"], b(o.header)), listOf(msg["overhead.padding"], b(o.padding)),
+            listOf(msg["overhead.classes"], b(o.classes)), listOf("**${msg["summary.totalShallow"]}**", b(o.data + o.header + o.padding + o.classes))))
         sub("waste.strings")
         val st = w.strings
         table(listOf("summary.metric", "col.count"), listOf(
@@ -253,13 +319,19 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
 
     if (full) {
         section("section.strings")
+        r.duplicateStringsTotal?.let { appendLine("**${msg["strings.total", n(it.values), n(it.copies), b(it.wasted)]}**\n") }
         table(listOf("col.value", "col.copies", "col.bytesEach", "col.wasted"),
             r.duplicateStrings.map { listOf("\"${it.value}\"", n(it.count), b(it.bytesEach), b(it.wasted)) })
+        if (!ins?.stringsByOwner.isNullOrEmpty()) {
+            sub("strings.byOwner")
+            table(listOf("col.field", "col.excessCopies", "col.wasted"), ins!!.stringsByOwner.filterNot { it.jdk }.map { listOf(it.owner, n(it.copies), b(it.bytes)) })
+            jdkHidden(ins.stringsByOwner.count { it.jdk })
+        }
     }
 
     section("section.arrays")
     table(listOf("col.id", "col.type", "col.length", "col.bytes", "col.retained"),
-        r.largestArrays.map { listOf(it.id, it.className, n(it.length), b(it.bytes), b(it.retained)) })
+        r.largestArrays.map { listOf(it.id, it.className + (if (it.unreachable) " (${msg["arrays.unreachable"]})" else ""), n(it.length), b(it.bytes), b(it.retained)) })
 
     // ======== Runtime ========
     layer(LAYERS[4])
@@ -291,7 +363,7 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         sub("conc.pools")
         table(listOf("col.type", "col.class", "col.id", "col.core", "col.max", "col.threads", "col.queue", "col.unbounded", "col.queued", "col.completed"),
             c.pools.map { listOf(it.kind, it.className, it.id, it.core, it.max, it.threads, it.queueType,
-                it.unbounded?.let { u -> if (u) msg["misc.yes"] else msg["misc.no"] }, n(it.queued), n(it.completed)) })
+                if (it.scheduled) msg["conc.scheduled"] else it.unbounded?.let { u -> if (u) msg["misc.yes"] else msg["misc.no"] }, n(it.queued), n(it.completed)) })
         sub("conc.poolsByClass")
         table(listOf("col.class", "col.count"), c.poolsByClass.map { listOf(it.name, n(it.count)) })
         sub("conc.tlValues")
@@ -363,9 +435,21 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         section("section.loaders")
         table(listOf("col.id", "col.class", "col.classesLoaded", "col.retained"),
             r.classLoaders.map { listOf(it.id, it.className, n(it.classesLoaded), b(it.retained)) })
+        if (!ins?.duplicateClasses.isNullOrEmpty()) {
+            sub("loaders.duplicate")
+            table(listOf("col.class", "col.loaders"), ins!!.duplicateClasses.map { listOf(it.name, n(it.loaders)) })
+        }
 
         section("section.gcRoots")
         table(listOf("col.type", "col.count"), r.gcRoots.map { listOf(it.name, n(it.count)) })
+    }
+
+    if (!ins?.libraries.isNullOrEmpty()) {
+        section("section.libraries")
+        appendLine("> ${msg["note.libraries"]}\n")
+        table(listOf("col.library", "col.versions", "col.jars"), ins!!.libraries.map {
+            listOf((if (it.versions.size > 1) "⚠️ " else "") + it.name, it.versions.joinToString(), it.jars.joinToString())
+        })
     }
 
     r.graph?.let { g ->
@@ -392,7 +476,7 @@ fun toMarkdown(r: HeapReport, msg: Messages = Messages.load()): String = buildSt
         table(listOf("col.type", "col.count"), m.records.map { listOf(it.name, n(it.count)) })
     }
 
-    appendLine("---\n\n_${msg["report.generatedBy", s.toolVersion]}_")
+    appendLine("---\n\n_${msg["report.generatedBy", s.toolVersion]}_ · <$PROJECT_URL>")
 }
 
 private fun resource(name: String) =
@@ -402,8 +486,9 @@ private fun resource(name: String) =
 private fun safeJson(json: String) = json.replace("</", "<\\/")
 
 fun toHtml(r: HeapReport, msg: Messages = Messages.load()): String {
-    val i18n = safeJson(Json.encodeToString(msg.all())) + "; const LOCALE = " + Json.encodeToString(msg.tag)
-    val data = safeJson(Json.encodeToString(r))
+    val i18n = safeJson(Json.encodeToString(msg.all())) + "; const LOCALE = " + Json.encodeToString(msg.tag) +
+        "; const PROJECT_URL = " + Json.encodeToString(PROJECT_URL)
+    val data = safeJson(r.scrub(Json.encodeToString(r)))
     // each placeholder is split out once, so inserted content is never re-scanned
     val (a, rest1) = resource("report.html").split("/*ECHARTS*/", limit = 2)
     val (b, rest2) = rest1.split("/*I18N*/", limit = 2)

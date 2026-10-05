@@ -27,7 +27,7 @@ data class ConcurrencyReport(
     val flame: TreeNode?,
     /** Every pool by class (before the top-N cut of [pools]). */
     val poolsByClass: List<NamedCount> = emptyList(),
-    /** ThreadPoolExecutors with max = Integer.MAX_VALUE and an unbounded queue: max is never reached. */
+    /** ThreadPoolExecutors with max = Integer.MAX_VALUE and an unbounded queue (max never reached); scheduled pools excluded. */
     val unboundedPools: Int = 0,
 )
 
@@ -39,6 +39,8 @@ data class ConcurrencyReport(
 data class PoolStat(
     val kind: String, val className: String, val id: String, val core: Int?, val max: Int?, val threads: Int?,
     val queueType: String?, val queued: Int?, val completed: Long?, val unbounded: Boolean? = null,
+    /** ScheduledThreadPoolExecutor (or subclass): max = Integer.MAX_VALUE with a DelayedWorkQueue is its design. */
+    val scheduled: Boolean = false,
 )
 
 private val UNBOUNDED_QUEUES = setOf(
@@ -104,7 +106,7 @@ internal class ConcurrencyCollector : Collector() {
                 .sortedByDescending { it.count }.take(top),
             flame = flame(threads),
             poolsByClass = all.groupingBy { it.className }.eachCount().map { NamedCount(it.key, it.value) }.sortedByDescending { it.count },
-            unboundedPools = all.count { it.max == Int.MAX_VALUE && it.unbounded == true },
+            unboundedPools = all.count { it.max == Int.MAX_VALUE && it.unbounded == true && !it.scheduled },
         )
     }
 
@@ -118,7 +120,8 @@ internal class ConcurrencyCollector : Collector() {
         return when (kind) {
             "ThreadPoolExecutor" -> PoolStat(kind, p.instanceClassName, hex(p.objectId), int("corePoolSize"), int("maximumPoolSize"),
                 p.refField("workers")?.asInstance?.refField("map")?.asInstance?.field("size")?.asInt,
-                queue?.instanceClassName, queue?.let(::queueSize), p.field("completedTaskCount")?.asLong, queue?.let(::unbounded))
+                queue?.instanceClassName, queue?.let(::queueSize), p.field("completedTaskCount")?.asLong, queue?.let(::unbounded),
+                p instanceOf "java.util.concurrent.ScheduledThreadPoolExecutor")
             "ForkJoinPool" -> {
                 // queued = sum of (top - base) over the work queues ("queues" in JDK 25, "workQueues" before)
                 val queues = (p.refField("queues") ?: p.refField("workQueues"))?.asObjectArray?.readElements()?.mapNotNull { it.asObject?.asInstance }?.toList()
@@ -201,7 +204,7 @@ internal fun readThreads(
         val frameList = traces[root.stackTraceSerialNumber]?.stackFrameIds?.mapIndexed { i, fid ->
             val f = frames[fid]
             val text = if (f == null) "?" else {
-                val cls = strings[classNameIdBySerial[f.classSerialNumber]]?.replace('/', '.') ?: "?"
+                val cls = strings[classNameIdBySerial[f.classSerialNumber]]?.let { normalizeClassName(it).replace('/', '.') } ?: "?"
                 val method = strings[f.methodNameStringId] ?: "?"
                 val src = strings[f.sourceFileNameStringId]
                 val where = when {
