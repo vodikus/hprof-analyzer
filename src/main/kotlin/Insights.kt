@@ -374,7 +374,7 @@ internal class InsightInputs(
 /** Everything computed from the heap graph; scores, health and the executive summary come later in [conclude]. */
 internal fun insights(i: InsightInputs, opt: Options, warnings: MutableList<String>): Insights {
     fun <T> g(section: String, fallback: T, block: () -> T): T = try { block() } catch (e: Exception) {
-        val w = opt.msg["warn.section", opt.msg[section], e.toString()]
+        val w = opt.msg["warn.section", opt.msg[section], e.brief()]
         opt.log(w); warnings.add(w); fallback
     }
     val h = i.h

@@ -120,6 +120,6 @@ internal fun parseThresholds(spec: String, base: Map<String, Double> = DEFAULT_T
     base + spec.split(',').map(String::trim).filter(String::isNotEmpty).associate { kv ->
         val key = kv.substringBefore('=').trim()
         require(key in DEFAULT_THRESHOLDS) { key }
-        key to (kv.substringAfter('=', "").trim().toDoubleOrNull() ?: throw IllegalArgumentException(kv))
+        key to (kv.substringAfter('=', "").trim().toDoubleOrNull()?.takeIf { it.isFinite() } ?: throw IllegalArgumentException(kv))
     }
 }

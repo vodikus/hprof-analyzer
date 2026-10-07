@@ -1087,14 +1087,16 @@ const DATA = /*DATA*/;
         // secondary tables (e.g. pre-allocated exceptions) start closed
         const box = tb.collapsed ? el('details', null, el('summary', { text: t(tb.title) })) : fs;
         if (tb.collapsed) fs.append(box); else fs.append(el('p', null, el('b', { text: t(tb.title) })));
-        const cols = tb.columns.map((c, i) => c.type === 'text'
+        // the default column type ("text") is omitted from the JSON
+        const columns = tb.columns.map(c => ({ ...c, type: c.type || 'text' }));
+        const cols = columns.map((c, i) => c.type === 'text'
           ? { h: t(c.key), v: r => r[i], mono: i === 0 }
           : { h: t(c.key), v: r => r[i] == null ? null : Number(r[i]), f: c.type === 'bytes' ? bytes : num, num: true });
         // bar of the first numeric column (bytes preferred) by the first text column
-        const k = tb.columns.findIndex(c => c.type === 'bytes') >= 0 ? tb.columns.findIndex(c => c.type === 'bytes') : tb.columns.findIndex(c => c.type === 'num');
-        const label = tb.columns.findIndex(c => c.type === 'text');
+        const k = columns.findIndex(c => c.type === 'bytes') >= 0 ? columns.findIndex(c => c.type === 'bytes') : columns.findIndex(c => c.type === 'num');
+        const label = columns.findIndex(c => c.type === 'text');
         const items = tb.rows.filter(r => Number(r[k]) > 0).slice(0, 15).map(r => ({ name: r[label] ?? '-', value: Number(r[k]) }));
-        if (!tb.collapsed && k >= 0 && label >= 0 && items.length > 1) chart(fs, () => hbar(items, tb.columns[k].type === 'bytes' ? bytes : num), barHeight(items.length));
+        if (!tb.collapsed && k >= 0 && label >= 0 && items.length > 1) chart(fs, () => hbar(items, columns[k].type === 'bytes' ? bytes : num), barHeight(items.length));
         box.append(table(cols, tb.rows));
       });
     });

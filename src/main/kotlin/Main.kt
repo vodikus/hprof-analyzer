@@ -1,5 +1,6 @@
 package hprof
 
+import java.io.EOFException
 import java.io.File
 import java.util.Properties
 import kotlin.system.exitProcess
@@ -60,7 +61,11 @@ fun main(args: Array<String>) {
     }
 
     System.err.println(NAME_VERSION)
-    val report = analyze(file, Options(top, retained, leakClasses, appPackages, redact, thresholds, msg)).let { r ->
+    val report = try {
+        analyze(file, Options(top, retained, leakClasses, appPackages, redact, thresholds, msg))
+    } catch (e: EOFException) {
+        fail(msg["cli.truncated", file, e.toString()])
+    }.let { r ->
         if (snapshots.isEmpty()) r else conclude(r.copy(diff = diff(toSnapshot(r), snapshots, top)), thresholds)
     }
     out.mkdirs()

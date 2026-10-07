@@ -572,9 +572,21 @@ private fun HeapObject.detail(clean: (String) -> String): String? = when {
 }
 
 fun analyze(file: File, opt: Options = Options()): HeapReport {
+    val repaired = repairTruncated(file)
+    val truncated = repaired?.let { opt.msg["warn.truncated", bytes(it.kept), bytes(file.length())] }
+    truncated?.let(opt.log)
+    try {
+        return analyze(file, repaired?.file ?: file, opt, truncated)
+    } finally {
+        repaired?.file?.delete()
+    }
+}
+
+/** [source] is the dump the user gave (name and size in the report); [file] is what gets parsed; [truncated] = warning when it was cut. */
+private fun analyze(source: File, file: File, opt: Options, truncated: String?): HeapReport {
     val start = System.currentTimeMillis()
     val header = HprofHeader.parseHeaderOf(file)
-    opt.log(opt.msg["log.indexing", file.name])
+    opt.log(opt.msg["log.indexing", source.name])
     // index every GC root type (Shark's default skips VmInternal, InternedString, ...)
     val rootTags = EnumSet.copyOf(HprofRecordTag.values().filter { it.name.startsWith("ROOT_") })
     file.openHeapGraph(indexedGcRootTypes = rootTags).use { graph ->
@@ -583,9 +595,9 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
 
         // Sections outside the core pass are independent: a failure (e.g. an inconsistent dump) becomes a
         // report warning and an empty section instead of losing the whole analysis.
-        val warnings = ArrayList<String>()
+        val warnings = ArrayList(listOfNotNull(truncated))
         fun <T> guard(section: String, fallback: T, block: () -> T): T = try { block() } catch (e: Exception) {
-            val w = opt.msg["warn.section", opt.msg[section], e.toString()]
+            val w = opt.msg["warn.section", opt.msg[section], e.brief()]
             opt.log(w); warnings.add(w); fallback
         }
 
@@ -654,54 +666,59 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
             classAccs[acc].shallow += size
             totalShallow += size
 
-            when (obj) {
-                is HeapClass -> {
-                    waste.classObject(size)
-                    for (f in obj.readStaticFields()) if (f.value.isNonNullReference) addEdge(idx, f.value.asNonNullObjectId!!)
-                    val loaderId = obj.readRecord().classLoaderId
-                    loaderOf[idx] = loaderIdx(loaderId)
-                    classesPerLoader.merge(loaderId, 1, Int::plus)
-                    if (loaderId != 0L) addEdge(idx, loaderId)
-                }
-                is HeapInstance -> {
-                    addEdge(idx, obj.instanceClassId) // an instance keeps its class alive
-                    loaderOf[idx] = loaderOfClass(obj.instanceClassId)
-                    val fields = obj.readFields().toList()
-                    for (f in fields) {
-                        if (!f.value.isNonNullReference) continue
-                        // weak/soft/phantom referents do not retain memory
-                        if (f.name == "referent" && f.declaringClass.name == "java.lang.ref.Reference") continue
-                        addEdge(idx, f.value.asNonNullObjectId!!)
+            // a truncated dump still references objects past the cut: skip what can't be read
+            try {
+                when (obj) {
+                    is HeapClass -> {
+                        waste.classObject(size)
+                        for (f in obj.readStaticFields()) if (f.value.isNonNullReference) addEdge(idx, f.value.asNonNullObjectId!!)
+                        val loaderId = obj.readRecord().classLoaderId
+                        loaderOf[idx] = loaderIdx(loaderId)
+                        classesPerLoader.merge(loaderId, 1, Int::plus)
+                        if (loaderId != 0L) addEdge(idx, loaderId)
                     }
-                    if (name == "java.lang.String") {
-                        val value = obj.readAsJavaString()
-                        val valueArray = fields.named("value")?.asObject as? HeapPrimitiveArray
-                        if (value != null && value.length <= MAX_DEDUP_STRING) {
-                            strings.getOrPut(value) { StrAcc(0, size + (valueArray?.let { sizeOf(it) } ?: 0)) }.count++
+                    is HeapInstance -> {
+                        addEdge(idx, obj.instanceClassId) // an instance keeps its class alive
+                        loaderOf[idx] = loaderOfClass(obj.instanceClassId)
+                        val fields = obj.readFields().toList()
+                        for (f in fields) {
+                            if (!f.value.isNonNullReference) continue
+                            // weak/soft/phantom referents do not retain memory
+                            if (f.name == "referent" && f.declaringClass.name == "java.lang.ref.Reference") continue
+                            addEdge(idx, f.value.asNonNullObjectId!!)
                         }
-                        waste.string(fields, value, valueArray)
+                        if (name == "java.lang.String") {
+                            val value = obj.readAsJavaString()
+                            val valueArray = fields.named("value")?.asObject as? HeapPrimitiveArray
+                            if (value != null && value.length <= MAX_DEDUP_STRING) {
+                                strings.getOrPut(value) { StrAcc(0, size + (valueArray?.let { sizeOf(it) } ?: 0)) }.count++
+                            }
+                            waste.string(fields, value, valueArray)
+                        }
+                        waste.instance(obj, name, fields, size)
+                        refs.instance(obj, name, fields)
+                        offHeap.instance(name, fields)
+                        conc.instance(obj, name)
+                        fw.instance(obj)
+                        if (isLoaderClass.getOrPut(obj.instanceClassId) { obj instanceOf "java.lang.ClassLoader" }) {
+                            loaderIds.add(obj.objectId)
+                        }
+                        if (name in opt.leakClasses && leakIds.size < SUSPECTS * 2) leakIds.add(obj.objectId)
                     }
-                    waste.instance(obj, name, fields, size)
-                    refs.instance(obj, name, fields)
-                    offHeap.instance(name, fields)
-                    conc.instance(obj, name)
-                    fw.instance(obj)
-                    if (isLoaderClass.getOrPut(obj.instanceClassId) { obj instanceOf "java.lang.ClassLoader" }) {
-                        loaderIds.add(obj.objectId)
+                    is HeapObjectArray -> {
+                        loaderOf[idx] = loaderOfClass(obj.arrayClassId)
+                        var length = 0
+                        var nulls = 0
+                        for (e in obj.readElements()) {
+                            length++
+                            if (e.isNonNullReference) addEdge(idx, e.asNonNullObjectId!!) else nulls++
+                        }
+                        waste.objectArray(name, size, length, nulls)
                     }
-                    if (name in opt.leakClasses && leakIds.size < SUSPECTS * 2) leakIds.add(obj.objectId)
+                    is HeapPrimitiveArray -> waste.primitiveArray(size, obj.byteSize)
                 }
-                is HeapObjectArray -> {
-                    loaderOf[idx] = loaderOfClass(obj.arrayClassId)
-                    var length = 0
-                    var nulls = 0
-                    for (e in obj.readElements()) {
-                        length++
-                        if (e.isNonNullReference) addEdge(idx, e.asNonNullObjectId!!) else nulls++
-                    }
-                    waste.objectArray(name, size, length, nulls)
-                }
-                is HeapPrimitiveArray -> waste.primitiveArray(size, obj.byteSize)
+            } catch (e: IllegalArgumentException) {
+                if (truncated == null) throw e
             }
             if (++seen % 1_000_000 == 0) opt.log(opt.msg["log.progress", seen, n])
         }
@@ -867,8 +884,8 @@ fun analyze(file: File, opt: Options = Options()): HeapReport {
         }
 
         val summary = Summary(
-            file = file.name,
-            fileSize = file.length(),
+            file = source.name,
+            fileSize = source.length(),
             hprofVersion = header.version.versionString,
             identifierByteSize = header.identifierByteSize,
             refSize = sizeOf.model.refSize,

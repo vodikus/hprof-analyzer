@@ -2,6 +2,7 @@ package hprof
 
 import kotlinx.serialization.Serializable
 import shark.FilteringLeakingObjectFinder
+import shark.HeapAnalysisException
 import shark.HeapAnalysisFailure
 import shark.HeapAnalysisSuccess
 import shark.HeapAnalyzer
@@ -150,13 +151,16 @@ internal fun leakSuspects(file: File, graph: HeapGraph, leakClasses: Set<String>
     return LeakReport(leaking, groups)
 }
 
+/** One-line description for a report warning: HeapAnalysisException.toString() carries the whole stack trace. */
+internal fun Throwable.brief(): String = ((this as? HeapAnalysisException)?.cause ?: this).toString()
+
 /** Shortest path from a GC root to each suspect (one BFS per suspect). */
 internal fun findPaths(
     file: File, graph: HeapGraph, suspects: Set<Long>, opt: Options, warnings: MutableList<String>,
 ): List<LeakPath> {
     val analyzer = HeapAnalyzer(OnAnalysisProgressListener.NO_OP)
     fun warn(id: Long, e: Throwable) {
-        val w = opt.msg["log.analyzerFailed", hex(id), e.toString()]
+        val w = opt.msg["log.analyzerFailed", hex(id), e.brief()]
         opt.log(w); warnings.add(w)
     }
     // ponytail: one BFS per suspect; a single analyze() drops paths that pass through another suspect.

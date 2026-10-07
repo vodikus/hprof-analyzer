@@ -6,6 +6,7 @@ import java.lang.management.ManagementFactory
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class LeakMarker(val payload: ByteArray)
@@ -298,6 +299,19 @@ class AnalyzerTest {
             assertContains(htmlEn, "LOCALE = \"en\"")
             assertContains(htmlEn, "\"section.summary\":\"Summary\"")
             assertTrue("/*I18N*/" !in htmlEn)
+
+            // a dump cut mid heap segment: analyzed up to its last complete object, with a warning
+            assertNull(repairTruncated(dump))
+            val cut = File.createTempFile("cut", ".hprof")
+            try {
+                cut.writeBytes(dump.readBytes().copyOf((dump.length() * 7 / 10).toInt()))
+                val partial = analyze(cut, Options(top = 5, retained = false, log = {}))
+                assertTrue(partial.warnings.first().startsWith("Dump truncado"), "${partial.warnings}")
+                assertTrue(partial.summary.objectCount in 1 until report.summary.objectCount, "${partial.summary.objectCount}")
+                assertEquals(cut.length(), partial.summary.fileSize)
+            } finally {
+                cut.delete()
+            }
         } finally {
             dump.delete()
             Holder.marker = null
@@ -438,6 +452,7 @@ class AnalyzerTest {
         assertEquals(20.0, t["poolsPerClass"])
         assertEquals(DEFAULT_THRESHOLDS["lowFill"], t["lowFill"])
         assertTrue(parseThresholds("nope=1").isFailure && parseThresholds("lowFill=x").isFailure)
+        assertTrue(parseThresholds("lowFill=NaN").isFailure && parseThresholds("lowFill=Infinity").isFailure) // JSON can't encode them
 
         val base = SuspectScore("a.A", 0.0, 0, 0, share = 1.0, growth = 0.0, staticHeld = 1.0, collectionHeld = 0.0, depth = 0.0)
         assertEquals(50.0, score(base, null).score)
